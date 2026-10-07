@@ -1,1 +1,6 @@
 pytest
+fastapi
+uvicorn
+sqlalchemy
+psycopg-binary
+python-dotenv
