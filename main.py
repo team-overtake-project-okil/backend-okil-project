@@ -1,11 +1,12 @@
 from fastapi import FastAPI
-from app.database import check_db
+from app.database import engine, Base
+import app.models
 
 app = FastAPI()
 
-@app.get("/")
-def read_root():
-    is_ok = check_db()
-    if is_ok:
-        return {"status": "Підключено до бази даних"}
-    return {"status": "Помилка підключення"}
+@app.on_event("startup")
+async def on_startup():
+    print("Створення таблиць у базі даних (асинхронно)...")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    print("Готово!")
