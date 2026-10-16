@@ -1,16 +1,23 @@
-import os
-from sqlalchemy import create_engine
-from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from sqlalchemy.orm import declarative_base
+from app.config import settings
 
-load_dotenv()
+engine = create_async_engine(
+    url=settings.DATABASE_URL_asyncpg,
+    echo=True,          
+    pool_size=5,        
+    max_overflow=10,
+    connect_args={"ssl": "require"}
+)
 
-url = os.getenv("DB_URL")
-engine = create_engine(url)
+async_session_maker = async_sessionmaker(
+    bind=engine, 
+    class_=AsyncSession,
+    expire_on_commit=False
+)
 
-def check_db():
-    try:
-        conn = engine.connect()
-        conn.close()
-        return True
-    except Exception:
-        return False
+Base = declarative_base()
+
+async def get_async_db():
+    async with async_session_maker() as session:
+        yield session

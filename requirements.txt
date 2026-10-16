@@ -1,6 +1,9 @@
 pytest
 fastapi
 uvicorn
-sqlalchemy
+sqlalchemy[asyncio]
 psycopg[binary]
 python-dotenv
+pydantic_settings
+geoalchemy2
+asyncpg
