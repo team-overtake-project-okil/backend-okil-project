@@ -1,8 +1,8 @@
 pytest
 fastapi
 uvicorn
-sqlalchemy
-psycopg-binary
+sqlalchemy[asyncio]
+psycopg[binary]
 python-dotenv
 pydantic_settings
 geoalchemy2
