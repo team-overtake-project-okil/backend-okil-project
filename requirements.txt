@@ -7,3 +7,4 @@ python-dotenv
 pydantic_settings
 geoalchemy2
 asyncpg
+httpx

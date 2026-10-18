@@ -4,9 +4,15 @@ from sqlalchemy import text
 from app.database import engine, Base
 import app.models
 from routers.points import router as points_router
+from routers.routes import router as routes_router
+from routers.stops import router as stops_router
+from routers.point_types import router as point_types_router
 
 app = FastAPI()
 app.include_router(points_router)
+app.include_router(routes_router)
+app.include_router(stops_router)
+app.include_router(point_types_router)
 
 @app.on_event("startup")
 async def on_startup():
