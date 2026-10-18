@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session_maker
-from app.models import Converter, PointType, Route, Stop, StopRouteConnectable
+from app.models import Converter, Point, PointType, Route, Stop, StopRouteConnectable
 
 SOURCE_NAME = "easyway"
 POINT_TYPE_NAME = "gtfs_stop"
@@ -106,6 +106,11 @@ async def main(zip_path: str, dry_run: bool = False):
     links_total = sum(len(r["stop_external_ids"]) for r in data["routes"])
     print(f"План: stops={len(data['stops'])} routes={len(data['routes'])} "
           f"links={links_total} відхилено_зупинок={data['rejected_stops']}")
+    # ЗАХИСТ: якщо нові дані непридатні, старі не чіпаємо взагалі.
+    if not data["stops"] or not data["routes"] or links_total == 0:
+        print("Error: у архіві немає придатних зупинок/маршрутів. "
+              "Імпорт скасовано, старі дані EasyWay збережено.")
+        return
     if dry_run:
         print("--dry-run: БД не чіпав.")
         return
@@ -128,8 +133,16 @@ async def main(zip_path: str, dry_run: bool = False):
             await session.execute(delete(Stop).where(Stop.source == SOURCE_NAME))
             old_conv = [x for x in old_conv if x is not None]
             if old_conv:
+                # Видаляємо лише ті converter, на які більше ніхто не посилається
+                # (ні points, ні stops інших джерел).
+                used_by_points = select(Point.placement_id).where(Point.placement_id.isnot(None))
+                used_by_stops = select(Stop.placement_id).where(Stop.placement_id.isnot(None))
                 await session.execute(
-                    delete(Converter).where(Converter.placement_id.in_(old_conv))
+                    delete(Converter).where(
+                        Converter.placement_id.in_(old_conv),
+                        Converter.placement_id.not_in(used_by_points),
+                        Converter.placement_id.not_in(used_by_stops),
+                    )
                 )
 
             pt_stmt = (
