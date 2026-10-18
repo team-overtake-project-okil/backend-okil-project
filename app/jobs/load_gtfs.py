@@ -3,7 +3,9 @@ import csv
 import io
 import sys
 import zipfile
-from sqlalchemy import text
+from collections import defaultdict
+
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session_maker
@@ -11,149 +13,180 @@ from app.models import Converter, PointType, Route, Stop, StopRouteConnectable
 
 SOURCE_NAME = "easyway"
 POINT_TYPE_NAME = "gtfs_stop"
+POINT_TYPE_CATEGORY = "transport"  # TODO: узгодити з командою (у HexTable колонка називається mobility)
+CHUNK = 3000  # asyncpg: максимум 32767 параметрів на запит; 3000 рядків * 4 колонки - з запасом
 
 
 def read_csv_from_zip(zip_file, filename):
     with zip_file.open(filename) as f:
-        return list(csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig")))
+        return list(csv.DictReader(io.TextIOWrapper(f, encoding="utf-8-sig", newline="")))
 
 
-async def main(zip_path: str):
-    try:
-        with zipfile.ZipFile(zip_path, "r") as z:
-            stops_data = read_csv_from_zip(z, "stops.txt")
-            routes_data = read_csv_from_zip(z, "routes.txt")
-            trips_data = read_csv_from_zip(z, "trips.txt")
-            stop_times_data = read_csv_from_zip(z, "stop_times.txt")
-    except FileNotFoundError:
-        print(f"Error: File not found at {zip_path}")
-        return
+def chunks(items, size=CHUNK):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
-    routes_to_insert = [
-        {
-            "source": SOURCE_NAME,
-            "external_id": r["route_id"],
-            "name": (
-                r.get("route_short_name", "").strip()
-                or r.get("route_long_name", "").strip()
-                or "Маршрут без назви"
-            )[:255],
-        }
-        for r in routes_data
-    ]
 
-    converters_to_insert = []
-    valid_stops_raw = []
+def parse_archive(zip_path: str) -> dict:
+    """Читає архів і готує дані до запису. БД тут не чіпається."""
+    with zipfile.ZipFile(zip_path, "r") as z:
+        stops_data = read_csv_from_zip(z, "stops.txt")
+        routes_data = read_csv_from_zip(z, "routes.txt")
+        trips_data = read_csv_from_zip(z, "trips.txt")
+        stop_times_data = read_csv_from_zip(z, "stop_times.txt")
 
+    # --- зупинки: тільки з коректними координатами ---
+    converters, valid_stops, rejected = [], [], 0
     for s in stops_data:
         try:
             lat = float(s["stop_lat"])
             lon = float(s["stop_lon"])
-            name = (s.get("stop_name") or "Зупинка").strip()[:255]
-            converters_to_insert.append(
-                {"placement": name, "geom": f"POINT({lon} {lat})"}
-            )
-            valid_stops_raw.append(s)
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError("coords out of range")
+            name = (s.get("stop_name") or "Зупинка").strip()
+            street = (s.get("stop_desc") or "").strip()
+            placement = f"{name} — {street}" if street else name
+            converters.append({"placement": placement[:255], "geom": f"POINT({lon} {lat})"})
+            valid_stops.append({"external_id": s["stop_id"], "name": name})
         except (ValueError, KeyError):
-            continue
+            rejected += 1
+    valid_ids = {s["external_id"] for s in valid_stops}
+    stop_name = {s["external_id"]: s["name"] for s in valid_stops}
 
-    trip_to_route = {t["trip_id"]: t["route_id"] for t in trips_data}
-
-    trip_stops = {}
-    for st in stop_times_data:
-        tid = st["trip_id"]
-        if tid not in trip_stops:
-            trip_stops[tid] = []
-        trip_stops[tid].append(
-            {"stop_id": st["stop_id"], "sequence": int(st["stop_sequence"])}
+    # --- маршрути: назва за номером (або довгою назвою) ---
+    route_title = {
+        r["route_id"]: (
+            r.get("route_short_name", "").strip()
+            or r.get("route_long_name", "").strip()
+            or "Маршрут без назви"
         )
+        for r in routes_data
+    }
 
-    route_best_trip = {}
-    for tid, rid in trip_to_route.items():
-        stops_count = len(trip_stops.get(tid, []))
-        if rid not in route_best_trip or stops_count > route_best_trip[rid][0]:
-            route_best_trip[rid] = (stops_count, tid)
+    # --- рейси та їхні зупинки ---
+    trip_info = {t["trip_id"]: (t["route_id"], t.get("direction_id") or "0") for t in trips_data}
+    trip_stops = defaultdict(list)
+    for st in stop_times_data:
+        if st["trip_id"] in trip_info:
+            trip_stops[st["trip_id"]].append((int(st["stop_sequence"]), st["stop_id"]))
+
+    # ВИПРАВЛЕНО: еталонний рейс окремо для кожного (маршрут, напрямок)
+    best = {}
+    for tid, (rid, direction) in trip_info.items():
+        n = len(trip_stops.get(tid, []))
+        key = (rid, direction)
+        if key not in best or n > best[key][0]:
+            best[key] = (n, tid)
+
+    routes = []
+    for (rid, direction), (_, tid) in sorted(best.items()):
+        if rid not in route_title:
+            continue
+        ids = [sid for _, sid in sorted(trip_stops.get(tid, [])) if sid in valid_ids]
+        if not ids:
+            continue
+        name = f"{route_title[rid]}: {stop_name[ids[0]]} → {stop_name[ids[-1]]}"
+        routes.append({"external_id": f"{rid}_{direction}", "name": name[:255],
+                       "stop_external_ids": ids})
+
+    return {"converters": converters, "stops": valid_stops, "routes": routes,
+            "rejected_stops": rejected}
+
+
+async def main(zip_path: str, dry_run: bool = False):
+    try:
+        data = parse_archive(zip_path)
+    except FileNotFoundError:
+        print(f"Error: File not found at {zip_path}")
+        return
+    except (zipfile.BadZipFile, KeyError) as e:
+        print(f"Error: некоректний GTFS-архів ({e!r})")
+        return
+
+    links_total = sum(len(r["stop_external_ids"]) for r in data["routes"])
+    print(f"План: stops={len(data['stops'])} routes={len(data['routes'])} "
+          f"links={links_total} відхилено_зупинок={data['rejected_stops']}")
+    if dry_run:
+        print("--dry-run: БД не чіпав.")
+        return
 
     async with async_session_maker() as session:
         async with session.begin():
-            # Очищення таблиць і скидання автоінкременту ID назад у 1
+            # ВИПРАВЛЕНО: замість TRUNCATE ... CASCADE (стирав points та чужі дані)
+            # видаляємо лише рядки цього джерела.
+            old_conv = (await session.execute(
+                select(Stop.placement_id).where(Stop.source == SOURCE_NAME)
+            )).scalars().all()
             await session.execute(
-                text(
-                    "TRUNCATE TABLE stop_route_connectable, routes, stops, converter RESTART IDENTITY CASCADE;"
+                delete(StopRouteConnectable).where(
+                    StopRouteConnectable.route_id.in_(
+                        select(Route.id).where(Route.source == SOURCE_NAME)
+                    )
                 )
             )
+            await session.execute(delete(Route).where(Route.source == SOURCE_NAME))
+            await session.execute(delete(Stop).where(Stop.source == SOURCE_NAME))
+            old_conv = [x for x in old_conv if x is not None]
+            if old_conv:
+                await session.execute(
+                    delete(Converter).where(Converter.placement_id.in_(old_conv))
+                )
 
             pt_stmt = (
                 pg_insert(PointType)
-                .values(type=POINT_TYPE_NAME, category="transport")
+                .values(type=POINT_TYPE_NAME, category=POINT_TYPE_CATEGORY)
                 .on_conflict_do_nothing(index_elements=["type"])
             )
             await session.execute(pt_stmt)
 
-            conv_stmt = (
-                pg_insert(Converter)
-                .values(converters_to_insert)
-                .returning(Converter.placement_id)
-            )
-            conv_res = await session.execute(conv_stmt)
-            inserted_placement_ids = [row.placement_id for row in conv_res]
+            # converter -> id (сортуємо: послідовність видає id у порядку рядків)
+            placement_ids = []
+            for part in chunks(data["converters"]):
+                res = await session.execute(
+                    pg_insert(Converter).values(part).returning(Converter.placement_id)
+                )
+                placement_ids.extend(sorted(row.placement_id for row in res))
 
             stops_to_insert = [
-                {
-                    "source": SOURCE_NAME,
-                    "external_id": s_raw["stop_id"],
-                    "type": POINT_TYPE_NAME,
-                    "placement_id": placement_id,
-                }
-                for s_raw, placement_id in zip(
-                    valid_stops_raw, inserted_placement_ids
-                )
+                {"source": SOURCE_NAME, "external_id": s["external_id"],
+                 "type": POINT_TYPE_NAME, "placement_id": pid}
+                for s, pid in zip(data["stops"], placement_ids)
             ]
-
-            stop_stmt = (
-                pg_insert(Stop)
-                .values(stops_to_insert)
-                .returning(Stop.id, Stop.external_id)
-            )
-            stop_res = await session.execute(stop_stmt)
-            stop_id_map = {row.external_id: row.id for row in stop_res}
-
-            route_stmt = (
-                pg_insert(Route)
-                .values(routes_to_insert)
-                .returning(Route.id, Route.external_id)
-            )
-            route_res = await session.execute(route_stmt)
-            route_id_map = {row.external_id: row.id for row in route_res}
-
-            links_to_insert = []
-            for rid, (_, tid) in route_best_trip.items():
-                if rid not in route_id_map:
-                    continue
-                db_route_id = route_id_map[rid]
-                sorted_stops = sorted(
-                    trip_stops.get(tid, []), key=lambda x: x["sequence"]
+            stop_id_map = {}
+            for part in chunks(stops_to_insert):
+                res = await session.execute(
+                    pg_insert(Stop).values(part).returning(Stop.id, Stop.external_id)
                 )
+                stop_id_map.update({row.external_id: row.id for row in res})
 
-                for order, st in enumerate(sorted_stops, start=1):
-                    ext_stop_id = st["stop_id"]
-                    if ext_stop_id in stop_id_map:
-                        links_to_insert.append(
-                            {
-                                "stop_id": stop_id_map[ext_stop_id],
-                                "route_id": db_route_id,
-                                "stop_order": order,
-                            }
-                        )
-
-            if links_to_insert:
-                await session.execute(
-                    pg_insert(StopRouteConnectable).values(links_to_insert)
+            # маршрути: окремий запис на кожен напрямок, з початковою і кінцевою зупинкою
+            routes_to_insert = [
+                {"source": SOURCE_NAME, "external_id": r["external_id"], "name": r["name"],
+                 "start_stop_id": stop_id_map[r["stop_external_ids"][0]],
+                 "end_stop_id": stop_id_map[r["stop_external_ids"][-1]]}
+                for r in data["routes"]
+            ]
+            route_id_map = {}
+            for part in chunks(routes_to_insert):
+                res = await session.execute(
+                    pg_insert(Route).values(part).returning(Route.id, Route.external_id)
                 )
+                route_id_map.update({row.external_id: row.id for row in res})
 
-    print("GTFS data successfully loaded.")
+            links_to_insert = [
+                {"stop_id": stop_id_map[ext], "route_id": route_id_map[r["external_id"]],
+                 "stop_order": order}
+                for r in data["routes"]
+                for order, ext in enumerate(r["stop_external_ids"], start=1)
+            ]
+            for part in chunks(links_to_insert):
+                await session.execute(pg_insert(StopRouteConnectable).values(part))
+
+    print(f"GTFS data successfully loaded: stops={len(stop_id_map)} "
+          f"routes={len(route_id_map)} links={len(links_to_insert)}")
 
 
 if __name__ == "__main__":
-    archive_path = sys.argv[1] if len(sys.argv) > 1 else "data/static.zip"
-    asyncio.run(main(archive_path))
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    archive_path = args[0] if args else "data/static.zip"
+    asyncio.run(main(archive_path, dry_run="--dry-run" in sys.argv))
