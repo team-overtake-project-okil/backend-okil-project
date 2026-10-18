@@ -1,6 +1,7 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
-
+from app.config import settings
 from app.database import engine, Base
 import app.models
 from routers.points import router as points_router
@@ -9,6 +10,13 @@ from routers.stops import router as stops_router
 from routers.point_types import router as point_types_router
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["GET"],
+    allow_headers=[],
+)
 app.include_router(points_router)
 app.include_router(routes_router)
 app.include_router(stops_router)
