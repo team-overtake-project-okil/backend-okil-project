@@ -17,6 +17,7 @@ def api(monkeypatch):
     from routers.points import router as points_router
     from routers.routes import router as routes_router
     from routers.stops import router as stops_router
+    from routers.hexagons import router as hexagons_router
 
 
     app = FastAPI()
@@ -25,6 +26,7 @@ def api(monkeypatch):
     app.include_router(routes_router)
     app.include_router(stops_router)
     app.include_router(point_types_router)
+    app.include_router(hexagons_router)
 
     result = Mock()
 
@@ -208,3 +210,47 @@ def test_invalid_integer_id_returns_422(api, path, parameter):
     )
 
     db.execute.assert_not_awaited()
+
+def test_get_hexagons_returns_empty_list(api):
+    client, db, result = api
+
+    result.mappings.return_value.all.return_value = []
+
+    response = client.get("/hexagons")
+
+    assert response.status_code == 200
+    assert response.json() == []
+    db.execute.assert_awaited_once()
+
+def test_get_hexagons_returns_all_rows(api):
+    client, db, result = api
+
+    rows = [
+        {
+            "h3_id": "8928308280bffff",
+            "health": 80,
+            "study": 60,
+            "daily": 70,
+            "mobility": 90,
+            "sport": 50,
+            "enjoyment": 65,
+            "security": 75,
+        },
+        {
+            "h3_id": "8928308280fffff",
+            "health": 40,
+            "study": 90,
+            "daily": 55,
+            "mobility": 60,
+            "sport": 85,
+            "enjoyment": 70,
+            "security": 80,
+        },
+    ]
+    result.mappings.return_value.all.return_value = rows
+
+    response = client.get("/hexagons")
+
+    assert response.status_code == 200
+    assert response.json() == rows
+    db.execute.assert_awaited_once()
