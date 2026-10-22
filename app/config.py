@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     DB_URL: str 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
-
+    SERPAPI_KEYS: str = ""
     @property
     def DATABASE_URL_asyncpg(self):
         url = self.DB_URL
