@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from geoalchemy2.functions import ST_X, ST_Y
 from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from geoalchemy2 import Geometry
 
 from app.database import get_async_db
 from app.models import Stop
@@ -15,6 +16,10 @@ async def get_stop(
     stop_id: int,
     db: AsyncSession = Depends(get_async_db),
 ):
+    stop_geometry = cast(
+        Stop.geom,
+        Geometry(geometry_type="POINT", srid=4326),
+    )
     result = await db.execute(
         select(
             Stop.id,
@@ -22,8 +27,8 @@ async def get_stop(
             Stop.type,
             Stop.source,
             Stop.external_id,
-            ST_Y(Stop.geom).label("lat"),
-            ST_X(Stop.geom).label("lng"),
+            ST_Y(stop_geometry).label("lat"),
+            ST_X(stop_geometry).label("lng"),
         ).where(Stop.id == stop_id)
     )
     row = result.mappings().first()
