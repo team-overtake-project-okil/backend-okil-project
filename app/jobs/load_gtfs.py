@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session_maker
-from app.models import Converter, Point, PointType, Route, Stop, StopRouteConnectable
+from app.models import PointType, Route, Stop, StopRouteConnectable
 
 SOURCE_NAME = "easyway"
 POINT_TYPE_NAME = "gtfs_stop"
@@ -36,29 +36,40 @@ def parse_archive(zip_path: str) -> dict:
         stop_times_data = read_csv_from_zip(z, "stop_times.txt")
 
     # --- зупинки: тільки з коректними координатами ---
-    converters, valid_stops, rejected = [], [], 0
-    for s in stops_data:
-        try:
-            lat = float(s["stop_lat"])
-            lon = float(s["stop_lon"])
-            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-                raise ValueError("coords out of range")
-            name = (s.get("stop_name") or "Зупинка").strip()
-            street = (s.get("stop_desc") or "").strip()
-            placement = f"{name} — {street}" if street else name
-            converters.append({"placement": placement[:255], "geom": f"POINT({lon} {lat})"})
-            valid_stops.append({"external_id": s["stop_id"], "name": name})
-        except (ValueError, KeyError):
-            rejected += 1
+        # --- зупинки: тільки з коректними координатами та реальною назвою ---
+        valid_stops, rejected = [], 0
+        for s in stops_data:
+            try:
+                lat = float(s["stop_lat"])
+                lon = float(s["stop_lon"])
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError("coords out of range")
+
+                # Очищаємо назву від пробілів
+                name = (s.get("stop_name") or "").strip()
+
+                # Якщо назва порожня або має дефолтний заповнювач — бракуємо запис
+                if not name or name.lower() in ("зупинка", "stop", "null", "none"):
+                    rejected += 1
+                    continue
+
+                valid_stops.append({
+                    "external_id": s["stop_id"],
+                    "name": name,
+                    "geom": f"POINT({lon} {lat})"
+                })
+            except (ValueError, KeyError):
+                rejected += 1
+
     valid_ids = {s["external_id"] for s in valid_stops}
     stop_name = {s["external_id"]: s["name"] for s in valid_stops}
 
     # --- маршрути: назва за номером (або довгою назвою) ---
     route_title = {
         r["route_id"]: (
-            r.get("route_short_name", "").strip()
-            or r.get("route_long_name", "").strip()
-            or "Маршрут без назви"
+                r.get("route_short_name", "").strip()
+                or r.get("route_long_name", "").strip()
+                or "Маршрут без назви"
         )
         for r in routes_data
     }
@@ -70,7 +81,7 @@ def parse_archive(zip_path: str) -> dict:
         if st["trip_id"] in trip_info:
             trip_stops[st["trip_id"]].append((int(st["stop_sequence"]), st["stop_id"]))
 
-    # ВИПРАВЛЕНО: еталонний рейс окремо для кожного (маршрут, напрямок)
+    # еталонний рейс окремо для кожного (маршрут, напрямок)
     best = {}
     for tid, (rid, direction) in trip_info.items():
         n = len(trip_stops.get(tid, []))
@@ -86,11 +97,17 @@ def parse_archive(zip_path: str) -> dict:
         if not ids:
             continue
         name = f"{route_title[rid]}: {stop_name[ids[0]]} → {stop_name[ids[-1]]}"
-        routes.append({"external_id": f"{rid}_{direction}", "name": name[:255],
-                       "stop_external_ids": ids})
+        routes.append({
+            "external_id": f"{rid}_{direction}",
+            "name": name[:255],
+            "stop_external_ids": ids
+        })
 
-    return {"converters": converters, "stops": valid_stops, "routes": routes,
-            "rejected_stops": rejected}
+    return {
+        "stops": valid_stops,
+        "routes": routes,
+        "rejected_stops": rejected
+    }
 
 
 async def main(zip_path: str, dry_run: bool = False):
@@ -106,22 +123,20 @@ async def main(zip_path: str, dry_run: bool = False):
     links_total = sum(len(r["stop_external_ids"]) for r in data["routes"])
     print(f"План: stops={len(data['stops'])} routes={len(data['routes'])} "
           f"links={links_total} відхилено_зупинок={data['rejected_stops']}")
+
     # ЗАХИСТ: якщо нові дані непридатні, старі не чіпаємо взагалі.
     if not data["stops"] or not data["routes"] or links_total == 0:
         print("Error: у архіві немає придатних зупинок/маршрутів. "
               "Імпорт скасовано, старі дані EasyWay збережено.")
         return
+
     if dry_run:
         print("--dry-run: БД не чіпав.")
         return
 
     async with async_session_maker() as session:
         async with session.begin():
-            # ВИПРАВЛЕНО: замість TRUNCATE ... CASCADE (стирав points та чужі дані)
-            # видаляємо лише рядки цього джерела.
-            old_conv = (await session.execute(
-                select(Stop.placement_id).where(Stop.source == SOURCE_NAME)
-            )).scalars().all()
+            # Очищення старих даних лише конкретного джерела
             await session.execute(
                 delete(StopRouteConnectable).where(
                     StopRouteConnectable.route_id.in_(
@@ -131,20 +146,8 @@ async def main(zip_path: str, dry_run: bool = False):
             )
             await session.execute(delete(Route).where(Route.source == SOURCE_NAME))
             await session.execute(delete(Stop).where(Stop.source == SOURCE_NAME))
-            old_conv = [x for x in old_conv if x is not None]
-            if old_conv:
-                # Видаляємо лише ті converter, на які більше ніхто не посилається
-                # (ні points, ні stops інших джерел).
-                used_by_points = select(Point.placement_id).where(Point.placement_id.isnot(None))
-                used_by_stops = select(Stop.placement_id).where(Stop.placement_id.isnot(None))
-                await session.execute(
-                    delete(Converter).where(
-                        Converter.placement_id.in_(old_conv),
-                        Converter.placement_id.not_in(used_by_points),
-                        Converter.placement_id.not_in(used_by_stops),
-                    )
-                )
 
+            # Створення типу точки, якщо відсутній
             pt_stmt = (
                 pg_insert(PointType)
                 .values(type=POINT_TYPE_NAME, category=POINT_TYPE_CATEGORY)
@@ -152,18 +155,15 @@ async def main(zip_path: str, dry_run: bool = False):
             )
             await session.execute(pt_stmt)
 
-            # converter -> id (сортуємо: послідовність видає id у порядку рядків)
-            placement_ids = []
-            for part in chunks(data["converters"]):
-                res = await session.execute(
-                    pg_insert(Converter).values(part).returning(Converter.placement_id)
-                )
-                placement_ids.extend(sorted(row.placement_id for row in res))
-
+            # Вставка зупинок напряму з геометрією
             stops_to_insert = [
-                {"source": SOURCE_NAME, "external_id": s["external_id"],
-                 "type": POINT_TYPE_NAME, "placement_id": pid}
-                for s, pid in zip(data["stops"], placement_ids)
+                {
+                    "source": SOURCE_NAME,
+                    "external_id": s["external_id"],
+                    "type": POINT_TYPE_NAME,
+                    "geom": s["geom"],
+                }
+                for s in data["stops"]
             ]
             stop_id_map = {}
             for part in chunks(stops_to_insert):
@@ -172,11 +172,15 @@ async def main(zip_path: str, dry_run: bool = False):
                 )
                 stop_id_map.update({row.external_id: row.id for row in res})
 
-            # маршрути: окремий запис на кожен напрямок, з початковою і кінцевою зупинкою
+            # Вставка маршрутів
             routes_to_insert = [
-                {"source": SOURCE_NAME, "external_id": r["external_id"], "name": r["name"],
-                 "start_stop_id": stop_id_map[r["stop_external_ids"][0]],
-                 "end_stop_id": stop_id_map[r["stop_external_ids"][-1]]}
+                {
+                    "source": SOURCE_NAME,
+                    "external_id": r["external_id"],
+                    "name": r["name"],
+                    "start_stop_id": stop_id_map[r["stop_external_ids"][0]],
+                    "end_stop_id": stop_id_map[r["stop_external_ids"][-1]],
+                }
                 for r in data["routes"]
             ]
             route_id_map = {}
@@ -186,9 +190,13 @@ async def main(zip_path: str, dry_run: bool = False):
                 )
                 route_id_map.update({row.external_id: row.id for row in res})
 
+            # Зв'язки між зупинками та маршрутами
             links_to_insert = [
-                {"stop_id": stop_id_map[ext], "route_id": route_id_map[r["external_id"]],
-                 "stop_order": order}
+                {
+                    "stop_id": stop_id_map[ext],
+                    "route_id": route_id_map[r["external_id"]],
+                    "stop_order": order,
+                }
                 for r in data["routes"]
                 for order, ext in enumerate(r["stop_external_ids"], start=1)
             ]
