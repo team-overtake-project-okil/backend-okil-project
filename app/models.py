@@ -38,9 +38,9 @@ class PointType(Base):
 
     type = Column(String(50), primary_key=True)
     category = Column(String(50), nullable=False, index=True)
-    radius_of_influence_1 = Column(Float, nullable=True)
-    radius_of_influence_2 = Column(Float, nullable=True)
-    radius_of_influence_3 = Column(Float, nullable=True)
+    radius_of_influence_1 = Column(Float, nullable=False)
+    radius_of_influence_2 = Column(Float, nullable=False)
+    radius_of_influence_3 = Column(Float, nullable=False)
 
     # Relationships
     points = relationship("Point", back_populates="point_type", cascade="all, delete-orphan")
@@ -51,12 +51,12 @@ class Point(Base):
     __tablename__ = 'points'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    h3_id = Column(H3IndexType, ForeignKey('hex_table.h3_id', ondelete="SET NULL"), index=True, nullable=True)
+    h3_id = Column(H3IndexType, ForeignKey('hex_table.h3_id', ondelete="SET NULL"), index=True, nullable=False)
     type = Column(String(50), ForeignKey('point_types.type', ondelete="CASCADE"), index=True, nullable=False)
 
     source = Column(String(50), nullable=False)
     external_id = Column(String(255), nullable=False)
-    name = Column(String(255), nullable=True)
+    name = Column(String(255), nullable=False)
 
     # Геодані збережено напряму
     geom = Column(Geography(geometry_type='POINT', srid=4326), nullable=False)
@@ -74,7 +74,7 @@ class Stop(Base):
     __tablename__ = 'stops'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    h3_id = Column(H3IndexType, ForeignKey('hex_table.h3_id', ondelete="SET NULL"), index=True, nullable=True)
+    h3_id = Column(H3IndexType, ForeignKey('hex_table.h3_id', ondelete="SET NULL"), index=True, nullable=False)
     type = Column(String(50), ForeignKey('point_types.type', ondelete="CASCADE"), index=True, nullable=False)
 
     source = Column(String(50), nullable=False)
@@ -101,8 +101,8 @@ class Route(Base):
     external_id = Column(String(255), nullable=False)
     name = Column(String(255), nullable=False)
 
-    start_stop_id = Column(Integer, ForeignKey('stops.id', ondelete="SET NULL"), index=True, nullable=True)
-    end_stop_id = Column(Integer, ForeignKey('stops.id', ondelete="SET NULL"), index=True, nullable=True)
+    start_stop_id = Column(Integer, ForeignKey('stops.id', ondelete="SET NULL"), index=True, nullable=False)
+    end_stop_id = Column(Integer, ForeignKey('stops.id', ondelete="SET NULL"), index=True, nullable=False)
 
     # Relationships
     start_stop = relationship("Stop", foreign_keys="[Route.start_stop_id]")
