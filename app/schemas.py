@@ -55,6 +55,9 @@ class PointCreate(PointBase):
 
 class PointResponse(PointBase):
     id: int
+    lat: float
+    lng: float
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -73,6 +76,9 @@ class StopCreate(StopBase):
 
 class StopResponse(StopBase):
     id: int
+    lat: float
+    lng: float
+
     model_config = ConfigDict(from_attributes=True)
 
 

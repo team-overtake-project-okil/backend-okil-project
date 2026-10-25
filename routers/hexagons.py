@@ -5,8 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_async_db
 from app.models import HexTable
 from app.schemas import HexTableResponse
+from app.hexagon_repository import fetch_hexagons
 
 router = APIRouter(prefix="/hexagons", tags=["hexagons"])
+
+@router.get("", response_model=list[HexTableResponse])
+async def get_hexagons(
+    db: AsyncSession = Depends(get_async_db),
+):
+    return await fetch_hexagons(db)
 
 @router.get("/{h3_id}", response_model=HexTableResponse)
 async def get_hexagon(
