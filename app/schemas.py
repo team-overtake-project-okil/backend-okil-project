@@ -10,6 +10,7 @@ class HexTableBase(BaseModel):
     mobility: int = 0
     sport: int = 0
     enjoyment: int = 0
+    food: int = 0 
     security: int = 0
 
 

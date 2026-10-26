@@ -24,6 +24,7 @@ class HexTable(Base):
     mobility = Column(Integer, default=0, nullable=False)
     sport = Column(Integer, default=0, nullable=False)
     enjoyment = Column(Integer, default=0, nullable=False)
+    food = Column(Integer, default=0, nullable=False)
     security = Column(Integer, default=0, nullable=False)
 
     geom = Column(Geography(geometry_type='POINT', srid=4326), nullable=False)
