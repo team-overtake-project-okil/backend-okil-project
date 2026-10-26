@@ -134,3 +134,28 @@ class StopRouteConnectable(Base):
     __table_args__ = (
         UniqueConstraint('route_id', 'stop_order', name='uq_route_stop_order'),
     )
+
+class RouteSegment(Base):
+    __tablename__ = 'route_segments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    start_stop_id = Column(Integer, ForeignKey('stops.id', ondelete="CASCADE"), index=True, nullable=False)
+    end_stop_id = Column(Integer, ForeignKey('stops.id', ondelete="CASCADE"), index=True, nullable=False)
+    geom = Column(Geography(geometry_type='LINESTRING', srid=4326), nullable=False)
+
+    route_links = relationship("RouteSegmentLink", back_populates="segment", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint('start_stop_id', 'end_stop_id', name='uq_segment_stops'),
+    )
+
+class RouteSegmentLink(Base):
+    __tablename__ = 'route_segment_links'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    segment_id = Column(Integer, ForeignKey('route_segments.id', ondelete="CASCADE"), index=True, nullable=False)
+    route_id = Column(Integer, ForeignKey('routes.id', ondelete="CASCADE"), index=True, nullable=False)
+    sequence_order = Column(Integer, nullable=False)
+
+    segment = relationship("RouteSegment", back_populates="route_links")
+    route = relationship("Route")
