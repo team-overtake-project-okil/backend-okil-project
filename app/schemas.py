@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional
 
 
@@ -21,6 +21,20 @@ class HexTableCreate(HexTableBase):
 class HexTableResponse(HexTableBase):
     model_config = ConfigDict(from_attributes=True)
 
+class HexagonRatingResponse(BaseModel):
+    h3_id: str
+    overall_rating: float = Field(ge=0, le=100)
+
+class HexagonWeights(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    health: float = Field(default=1.0, ge=0, le=5, alias="weight_health")
+    study: float = Field(default=1.0, ge=0, le=5, alias="weight_study")
+    daily: float = Field(default=1.0, ge=0, le=5, alias="weight_daily")
+    mobility: float = Field(default=1.0, ge=0, le=5, alias="weight_mobility")
+    sport: float = Field(default=1.0, ge=0, le=5, alias="weight_sport")
+    enjoyment: float = Field(default=1.0, ge=0, le=5, alias="weight_enjoyment")
+    security: float = Field(default=1.0, ge=0, le=5, alias="weight_security")
 
 # --- PointType ---
 class PointTypeBase(BaseModel):
