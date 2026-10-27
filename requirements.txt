@@ -1,5 +1,4 @@
 requests
-h3
 pytest
 fastapi
 uvicorn
@@ -10,3 +9,5 @@ pydantic_settings
 geoalchemy2
 asyncpg
 httpx
+h3>=4,<5
+shapely
