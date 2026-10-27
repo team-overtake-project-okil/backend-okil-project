@@ -40,14 +40,8 @@ def normalize_weights(weights: Mapping[str, float]) -> dict[str, float]:
     return {category: weight / total for category, weight in weights.items() if weight > 0}
 
 
-def calculate_overall_rating(
-    category_scores: Mapping[str, float | None],
-    user_weights: Mapping[str, float],
-) -> float:
-    """Calculate the overall rating on the same 0..100 scale as category scores.
-
-    Passing weight 0 disables a category; missing user weight also means disabled.
-    """
+def _normalized_user_weights(user_weights: Mapping[str, float]) -> dict[str, float]:
+    """Combine system and user weights, drop disabled categories, normalize."""
     combined_weights: dict[str, float] = {}
 
     for category, system_weight in SYSTEM_WEIGHTS.items():
@@ -58,18 +52,63 @@ def calculate_overall_rating(
             continue
         combined_weights[category] = system_weight + user_weight
 
-    normalized_weights = normalize_weights(combined_weights)
+    return normalize_weights(combined_weights)
+
+
+def _read_score(category_scores: Mapping[str, float | None], category: str) -> float:
+    raw_score = category_scores.get(category)
+    score = 0.0 if raw_score is None else float(raw_score)
+    if not math.isfinite(score) or not 0.0 <= score <= 100.0:
+        raise ValueError(f"Invalid category score for {category}: expected 0..100")
+    return score
+
+
+def calculate_overall_rating(
+    category_scores: Mapping[str, float | None],
+    user_weights: Mapping[str, float],
+) -> float:
+    """Calculate the overall rating on the same 0..100 scale as category scores.
+
+    Passing weight 0 disables a category; missing user weight also means disabled.
+    """
+    normalized_weights = _normalized_user_weights(user_weights)
     if not normalized_weights:
         return 0.0
 
     rating = 1.0
     for category, normalized_weight in normalized_weights.items():
-        raw_score = category_scores.get(category)
-        score = 0.0 if raw_score is None else float(raw_score)
-        if not math.isfinite(score) or not 0.0 <= score <= 100.0:
-            raise ValueError(f"Invalid category score for {category}: expected 0..100")
+        score = _read_score(category_scores, category)
         if score == 0.0:
             return 0.0
         rating *= score ** normalized_weight
 
     return round(rating, 2)
+
+
+def calculate_category_ratings(
+    category_scores: Mapping[str, float | None],
+    user_weights: Mapping[str, float],
+) -> list[dict]:
+    """Per-category breakdown for the detail endpoint.
+
+    adjusted_score = score ** normalized_weight is the category's contribution
+    to the multiplicative formula (the product of all of them is the overall rating).
+    """
+    normalized_weights = _normalized_user_weights(user_weights)
+    result = []
+
+    for category in SYSTEM_WEIGHTS:
+        score = _read_score(category_scores, category)
+        weight = normalized_weights.get(category)
+        enabled = weight is not None
+        result.append(
+            {
+                "category": category,
+                "score": score,
+                "enabled": enabled,
+                "weight": round(weight, 4) if enabled else 0.0,
+                "adjusted_score": round(score ** weight, 2) if enabled else None,
+            }
+        )
+
+    return result
