@@ -38,6 +38,19 @@ class HexagonWeights(BaseModel):
     food: float = Field(default=1.0, ge=0, le=5, alias="weight_food")
     security: float = Field(default=1.0, ge=0, le=5, alias="weight_security")
 
+class CategoryRating(BaseModel):
+    category: str
+    score: float = Field(ge=0, le=100)        # raw score from DB
+    enabled: bool                             # False when user weight == 0
+    weight: float = Field(ge=0, le=1)         # normalized weight
+    adjusted_score: float | None = None       # score ** weight (None if disabled)
+ 
+ 
+class HexagonDetailResponse(BaseModel):
+    h3_id: str
+    overall_rating: float = Field(ge=0, le=100)
+    categories: list[CategoryRating]
+
 # --- PointType ---
 class PointTypeBase(BaseModel):
     type: str
