@@ -250,5 +250,86 @@ def test_get_hexagons_returns_all_rows(api):
     response = client.get("/hexagons")
 
     assert response.status_code == 200
-    assert response.json() == rows
+    assert response.json() == [
+        {
+            "h3_id": "8928308280bffff",
+            "overall_rating": 68.9,
+        },
+        {
+            "h3_id": "8928308280fffff",
+            "overall_rating": 66.34,
+        },
+    ]
     db.execute.assert_awaited_once()
+
+@pytest.mark.parametrize(
+    "params, expected_rating",
+    [
+        pytest.param({}, 30.48, id="default-weights"),
+        pytest.param(
+            {"weight_health": 5},
+            46.95,
+            id="higher-health-weight",
+        ),
+        pytest.param(
+            {"weight_health": 0},
+            30.48,
+            id="minimum-health-weight",
+        ),
+    ],
+)
+def test_get_hexagons_applies_weights(api, params, expected_rating):
+    client, db, result = api
+
+    result.mappings.return_value.all.return_value = [
+        {
+            "h3_id": "8928308280bffff",
+            "health": 100,
+            "study": 25,
+            "daily": 25,
+            "mobility": 25,
+            "sport": 25,
+            "enjoyment": 25,
+            "security": 25,
+        }
+    ]
+
+    response = client.get("/hexagons", params=params)
+
+    assert response.status_code == 200
+    assert response.json() == [
+        {
+            "h3_id": "8928308280bffff",
+            "overall_rating": expected_rating,
+        }
+    ]
+    db.execute.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        "weight_health",
+        "weight_study",
+        "weight_daily",
+        "weight_mobility",
+        "weight_sport",
+        "weight_enjoyment",
+        "weight_security",
+    ],
+)
+@pytest.mark.parametrize("value", ["-1", "6", "abc", "nan", "inf"])
+def test_get_hexagons_rejects_invalid_weights(api, parameter, value):
+    client, db, _ = api
+
+    response = client.get(
+        "/hexagons",
+        params={parameter: value},
+    )
+
+    assert response.status_code == 422
+    assert any(
+        error["loc"] == ["query", parameter]
+        for error in response.json()["detail"]
+    )
+    db.execute.assert_not_awaited()

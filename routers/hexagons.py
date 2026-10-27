@@ -1,92 +1,48 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
-import math
 
 from app.database import get_async_db
-from app.models import HexTable
-from app.schemas import HexTableResponse
-from app.hexagon_repository import fetch_hexagons
+from app.hexagon_repository import fetch_hexagon, fetch_hexagons
+from app.schemas import HexagonDetailResponse, HexagonRatingResponse, HexagonWeights
+from app.scoring import calculate_category_ratings, calculate_overall_rating
+
 
 router = APIRouter(prefix="/hexagons", tags=["hexagons"])
 
-@router.get("", response_model=list[HexTableResponse])
+
+@router.get("", response_model=list[HexagonRatingResponse])
 async def get_hexagons(
+    weights: Annotated[HexagonWeights, Query()],
     db: AsyncSession = Depends(get_async_db),
 ):
-    return await fetch_hexagons(db)
+    user_weights = weights.model_dump()
+    hexagons = await fetch_hexagons(db)
 
-@router.get("/{h3_id}")
+    return [
+        {
+            "h3_id": hexagon["h3_id"],
+            "overall_rating": calculate_overall_rating(hexagon, user_weights),
+        }
+        for hexagon in hexagons
+    ]
+
+
+@router.get("/{h3_id}", response_model=HexagonDetailResponse)
 async def get_hexagon(
     h3_id: str,
-    weight_health: float = Query(1.0, ge=0.0, le=5.0),
-    weight_study: float = Query(1.0, ge=0.0, le=5.0),
-    weight_daily: float = Query(1.0, ge=0.0, le=5.0),
-    weight_mobility: float = Query(1.0, ge=0.0, le=5.0),
-    weight_sport: float = Query(1.0, ge=0.0, le=5.0),
-    weight_enjoyment: float = Query(1.0, ge=0.0, le=5.0),
-    weight_security: float = Query(1.0, ge=0.0, le=5.0),
+    weights: Annotated[HexagonWeights, Query()],
     db: AsyncSession = Depends(get_async_db),
 ):
-    result = await db.execute(
-        select(
-            cast(HexTable.h3_id, String).label("h3_id"),
-            HexTable.health,
-            HexTable.study,
-            HexTable.daily,
-            HexTable.mobility,
-            HexTable.sport,
-            HexTable.enjoyment,
-            HexTable.security,
-        ).where(cast(HexTable.h3_id, String) == h3_id)
-    )
-    row = result.mappings().first()
-
-    if row is None:
+    hexagon = await fetch_hexagon(db, h3_id)
+    if hexagon is None:
         raise HTTPException(status_code=404, detail="Hexagon not found")
 
-    data = dict(row)
+    user_weights = weights.model_dump()
 
-    #Задаємо критичні пороги (w_crit) для кожної категорії
-    critical_thresholds = {
-        "health": 1.0,     # Дуже важливо
-        "security": 1.0,   # Дуже важливо
-        "daily": 0.5,      # Важливо (магазини)
-        "mobility": 0.5,   # Важливо (транспорт)
-        "study": 0.0,      # Не критично для всіх
-        "sport": 0.0,      # Не критично
-        "enjoyment": 0.0,  # Не критично
+    return {
+        "h3_id": hexagon["h3_id"],
+        "overall_rating": calculate_overall_rating(hexagon, user_weights),
+        "categories": calculate_category_ratings(hexagon, user_weights),
     }
-
-    user_weights = {
-        "health": weight_health,
-        "study": weight_study,
-        "daily": weight_daily,
-        "mobility": weight_mobility,
-        "sport": weight_sport,
-        "enjoyment": weight_enjoyment,
-        "security": weight_security,
-    }
-
-    #Метод "Мінімальний поріг" (Wi = max(w_crit, w_user))
-    weights = {}
-    for category in user_weights:
-        weights[category] = max(critical_thresholds[category], user_weights[category])
-    
-    #Нормалізація ваг
-    total_weight = sum(weights.values())
-    if total_weight == 0:
-        normalized_weights = {k: 1.0 / len(weights) for k in weights}
-    else:
-        normalized_weights = {k: v / total_weight for k, v in weights.items()}
-
-    #Мультиплікативна формула
-    overall_rating = 1.0
-    for category in weights.keys():
-        score = data.get(category) or 0.0
-        score_safe = max(1.0, float(score)) 
-        overall_rating *= math.pow(score_safe, normalized_weights[category])
-
-    data["overall_rating"] = min(100.0, round(overall_rating, 2))
-
-    return data
