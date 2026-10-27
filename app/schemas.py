@@ -35,6 +35,7 @@ class HexagonWeights(BaseModel):
     mobility: float = Field(default=1.0, ge=0, le=5, alias="weight_mobility")
     sport: float = Field(default=1.0, ge=0, le=5, alias="weight_sport")
     enjoyment: float = Field(default=1.0, ge=0, le=5, alias="weight_enjoyment")
+    food: float = Field(default=1.0, ge=0, le=5, alias="weight_food")
     security: float = Field(default=1.0, ge=0, le=5, alias="weight_security")
 
 # --- PointType ---
