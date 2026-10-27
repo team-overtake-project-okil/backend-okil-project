@@ -15,7 +15,7 @@ from app.models import HexTable, PointType, Route, Stop, StopRouteConnectable
 H3_RESOLUTION = 9
 SOURCE_NAME = "easyway"
 POINT_TYPE_NAME = "gtfs_stop"
-POINT_TYPE_CATEGORY = "transport"
+POINT_TYPE_CATEGORY = "mobility"
 CHUNK = 2000  # Безпечний розмір пакету для asyncpg
 
 
@@ -55,6 +55,7 @@ async def ensure_hexagons_exist(session, h3_ids: set[str]):
             "mobility": 0,
             "sport": 0,
             "enjoyment": 0,
+            "food": 0, 
             "security": 0,
         })
 

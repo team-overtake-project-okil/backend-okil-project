@@ -12,6 +12,7 @@ async def fetch_hexagons(db: AsyncSession) -> list[dict]:
         HexTable.mobility,
         HexTable.sport,
         HexTable.enjoyment,
+        HexTable.food,
         HexTable.security,
     ).order_by(HexTable.h3_id)
 

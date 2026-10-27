@@ -51,6 +51,7 @@ def generate_lviv_hexagons(res: int = H3_RESOLUTION) -> list[dict]:
                 "mobility": 0,
                 "sport": 0,
                 "enjoyment": 0,
+                "food": 0,
                 "security": 0,
             }
         )
