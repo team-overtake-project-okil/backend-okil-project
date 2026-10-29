@@ -13,3 +13,4 @@ h3>=4,<5
 shapely
 pandas
 xlrd>=2.0.1
+xlrd>=2,<3
