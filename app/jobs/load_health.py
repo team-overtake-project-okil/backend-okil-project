@@ -20,6 +20,7 @@ from pathlib import Path
 FIELDS = (
     "source_key", "source_row", "name", "sub_category", "org_type",
     "address", "city", "latitude", "longitude", "status",
+    "source", "org_identifier", "coordinate_source", "h3_id", "evidence", "category_source",
 )
 
 
@@ -32,15 +33,21 @@ def clean(value: object) -> str:
 
 
 def categorize(name: str, org_type: str) -> str:
-    """Conservative mapping to the two categories allowed by sources.docx.
+    """Map service locations to existing health types, leaving uncertain ones blank.
 
     Ambiguous institutions are left blank for manual review instead of being
     silently mapped to hospitals/polyclinics.
     """
     text = f"{name} {org_type}".casefold()
+    if any(word in text for word in ("статистик", "судово-медич", "адміністрац")) or org_type.casefold() == "територіальне медичне об'єднання":
+        return ""
+    if "стоматолог" in text or "зубн" in text:
+        return "dentistry"
+    if "лікувально-діагностичн" in text or "діагностичний центр" in text:
+        return "polyclinic"
     if ("поліклінік" in text or "поліклінічн" in text) or "амбулатор" in text or "сімейної медицини" in text:
         return "polyclinic"
-    if "лікарня" in text or "шпитал" in text:
+    if "лікарня" in text or "шпитал" in text or "госпітал" in text:
         return "hospital"
     return ""
 
@@ -80,6 +87,8 @@ def convert(source: dict[str, object], excel_row: int) -> dict[str, str] | None:
         "latitude": "",
         "longitude": "",
         "status": "needs_geocoding" if sub else "review_category_and_geocoding",
+        "source": "lviv_city_council_health",
+        "org_identifier": clean(source.get("orgIdentifier")),
     }
 
 

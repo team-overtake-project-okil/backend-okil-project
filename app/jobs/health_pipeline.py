@@ -54,14 +54,18 @@ def write_csv(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 def query_serpapi(query: str, key: str, timeout: float = 25.0) -> list[dict]:
-    response = requests.get("https://serpapi.com/search", params={
-        "engine": "google_maps", "type": "search", "q": query,
-        "ll": "@49.8429,24.0316,12z", "hl": "uk", "gl": "ua", "api_key": key,
-    }, timeout=timeout)
-    response.raise_for_status()
+    try:
+        response = requests.get("https://serpapi.com/search", params={
+            "engine": "google_maps", "type": "search", "q": query,
+            "ll": "@49.8429,24.0316,12z", "hl": "uk", "gl": "ua", "api_key": key,
+        }, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException:
+        # requests' default exception includes the URL and its API-key query.
+        raise RuntimeError('SerpAPI request failed; credentials omitted') from None
     data = response.json()
     if data.get("error"):
-        raise RuntimeError(f"SerpAPI returned an error: {data['error']}")
+        raise RuntimeError('SerpAPI returned an error; response omitted')
     return data.get("local_results") or []
 
 
@@ -219,7 +223,7 @@ def stage_automatic(input_csv: Path, output_csv: Path) -> dict:
     for row in rows:
         reason = None
         category = row.get("sub_category", "")
-        if category not in {"hospital", "polyclinic"}:
+        if category not in {"hospital", "polyclinic", "dentistry"}:
             reason = "unclassified_category"
         elif row.get("match_reason") != "address_match_needs_manual_review":
             reason = "ambiguous_or_unmatched_address"
@@ -253,58 +257,35 @@ def validate_reviewed(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     for row in rows:
         if row.get("reviewed", "").strip().lower() != "yes":
             continue
-        if row.get("sub_category") not in {"hospital", "polyclinic"}:
+        if row.get("sub_category") not in {"hospital", "polyclinic", "dentistry"}:
             raise ValueError(f"Unapproved point type in row {row.get('source_row')}")
         if not has_valid_coords(row.get("latitude"), row.get("longitude")):
             raise ValueError(f"Invalid coordinates in row {row.get('source_row')}")
-        if not row.get("name") or not row.get("source_key"):
+        if not row.get("name", "").strip() or not row.get("source_key", "").strip():
             raise ValueError("Approved row needs name and stable source_key")
-        if row["source_key"] in seen:
+        source = row.get('source') or SOURCE
+        if source not in {SOURCE, 'moz_accredited_health', 'lviv_oblast_health_registry'}:
+            raise ValueError('Unmanaged healthcare source')
+        if len(row['source_key']) > 255:
+            raise ValueError('source_key exceeds database column length')
+        if row.get('h3_id'):
+            import h3
+            expected = h3.latlng_to_cell(float(row['latitude']), float(row['longitude']), H3_RES)
+            if row['h3_id'] != expected:
+                raise ValueError('H3 ID does not match coordinates at resolution 9')
+        key = (source, row['source_key'])
+        if key in seen:
             raise ValueError("Duplicate source_key in reviewed file")
-        seen.add(row["source_key"])
+        seen.add(key)
         approved.append(row)
     return approved
 
 
-async def import_reviewed(path: Path, write_db: bool) -> dict:
-    rows = validate_reviewed(read_csv(path))
-    if not write_db:
-        return {"approved": len(rows), "db_writes": 0, "mode": "dry_run"}
-    if not rows:
-        raise ValueError("No manually reviewed rows with reviewed=yes")
-    # Lazy imports make staging and unit tests independent of DB availability.
-    import h3
-    from sqlalchemy import select
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-    from app.database import async_session_maker
-    from app.models import HexTable, Point, PointType
-
-    async with async_session_maker() as session:
-        async with session.begin():
-            types = (await session.execute(select(PointType.type, PointType.category))).all()
-            valid_types = {name for name, category in types if category == "health"}
-            missing = {row["sub_category"] for row in rows} - valid_types
-            if missing:
-                raise ValueError(f"PointTypes missing health category/radii: {sorted(missing)}. Ask team to configure them first.")
-            hex_ids = set((await session.execute(select(HexTable.h3_id))).scalars().all())
-            values = []
-            excluded = 0
-            for row in rows:
-                lat, lng = float(row["latitude"]), float(row["longitude"])
-                h_id = h3.latlng_to_cell(lat, lng, H3_RES)
-                if h_id not in hex_ids:
-                    excluded += 1
-                    continue
-                values.append({"source": SOURCE, "external_id": row["source_key"],
-                               "name": row["name"][:255], "type": row["sub_category"],
-                               "h3_id": h_id, "geom": f"POINT({lng} {lat})"})
-            for i in range(0, len(values), 200):
-                stmt = pg_insert(Point).values(values[i:i+200])
-                await session.execute(stmt.on_conflict_do_update(
-                    constraint="uq_points_source_external_id",
-                    set_={"name": stmt.excluded.name, "type": stmt.excluded.type,
-                          "h3_id": stmt.excluded.h3_id, "geom": stmt.excluded.geom}))
-    return {"approved": len(rows), "upserted": len(values), "outside_existing_hex_grid": excluded, "mode": "write_db"}
+async def import_reviewed(path: Path, write_db: bool, *, check_db=False,
+                          expected_target=None, env_file=None) -> dict:
+    from app.jobs.health_import import run_import
+    return await run_import(path, write_db=write_db, check_db=check_db,
+                            expected_target=expected_target, env_file=env_file)
 
 
 def main() -> None:
@@ -324,6 +305,10 @@ def main() -> None:
     db.add_argument("--write-db", action="store_true")
     db.add_argument("--approved-reviewed-file", action="store_true")
     db.add_argument("--auto-validated-file", action="store_true")
+    db.add_argument('--check-db', action='store_true', help='Plan against live DB in a read-only transaction')
+    db.add_argument('--expected-target', help='Required fingerprint of the explicitly approved database for writes')
+    db.add_argument('--env-file', type=Path, default=Path('.env'))
+    db.add_argument('--report', type=Path)
     args = parser.parse_args()
     if args.action == "geocode":
         print(json.dumps(geocode(args.input, args.output, args.cache, max(0, args.limit), args.live), ensure_ascii=False, indent=2))
@@ -336,7 +321,14 @@ def main() -> None:
             expected = Path("tmp/health-auto-staged.csv").resolve()
             if args.input.resolve() != expected:
                 parser.error("--auto-validated-file requires tmp/health-auto-staged.csv")
-        print(json.dumps(asyncio.run(import_reviewed(args.input, args.write_db)), ensure_ascii=False, indent=2))
+        if args.write_db and not args.expected_target:
+            parser.error('DB writes require --expected-target from a checked and approved dry-run')
+        report = asyncio.run(import_reviewed(args.input, args.write_db, check_db=args.check_db,
+                                              expected_target=args.expected_target, env_file=args.env_file))
+        if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
