@@ -264,7 +264,7 @@ def validate_reviewed(rows: list[dict[str, str]]) -> list[dict[str, str]]:
         if not row.get("name", "").strip() or not row.get("source_key", "").strip():
             raise ValueError("Approved row needs name and stable source_key")
         source = row.get('source') or SOURCE
-        if source not in {SOURCE, 'moz_accredited_health', 'lviv_oblast_health_registry'}:
+        if source not in {SOURCE, 'moz_accredited_health', 'lviv_oblast_health_registry', 'openstreetmap_health'}:
             raise ValueError('Unmanaged healthcare source')
         if len(row['source_key']) > 255:
             raise ValueError('source_key exceeds database column length')

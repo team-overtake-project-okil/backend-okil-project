@@ -21,6 +21,7 @@ FIELDS = (
     "source_key", "source_row", "name", "sub_category", "org_type",
     "address", "city", "latitude", "longitude", "status",
     "source", "org_identifier", "coordinate_source", "h3_id", "evidence", "category_source",
+    "website", "phone", "ownership", "source_updated_at", "source_geometry", "address_source",
 )
 
 

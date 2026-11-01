@@ -83,8 +83,10 @@ Same-provider records are merged only with identity and normalized-address
 evidence. Different departments in the municipal registry remain separate,
 including at identical coordinates. Unresolved cross-source identities at one
 address are held for review. DB matching also preserves existing source keys;
-it skips identically named, same-type providers within 80 m instead of creating
-another source identity. It never deletes an existing point.
+across sources it skips identically named, same-type providers within 80 m
+instead of creating another source identity. Within the OSM source, stable
+object IDs are retained and the source reader uses address/contact evidence to
+resolve duplicates without collapsing separate practitioners. No point is deleted.
 
 ## Database dry-run and explicit write
 
@@ -142,3 +144,53 @@ credentials. They cover malformed sources, address splitting, coordinates,
 departments, stable identities, grid filtering, repeated planning, cache reuse,
 type configuration and target protection. A real write is intentionally
 separate from offline test execution.
+
+## Private clinics and dentistry from OpenStreetMap
+
+`health_osm` supplements registries with named medical POIs regardless of
+ownership. It reads an offline `.osm.pbf` extract, not an area-wide Nominatim
+search. Use the [Lviv oblast extract](https://download.openstreetmap.fr/extracts/europe/ukraine/)
+and preserve its timestamp, checksum and OSM attribution. Keep the large raw
+extract outside Git. `osmium` and Shapely 2 are required by this reader.
+
+```powershell
+python -m app.jobs.health_osm `
+  --file "C:/data/lviv_oblast-latest.osm.pbf" `
+  --snapshot "C:/work/health-database-snapshot.json" `
+  --known-records "C:/work/health-reviewed.csv" `
+  --as-of 2026-11-02 --types dentistry polyclinic `
+  --output "C:/work/health-private-reviewed.csv"
+```
+
+The snapshot contains `points`, `hex_ids` and `types` from read-only DB queries.
+Known staging CSVs can supply addresses and contact evidence for existing keys.
+Repeated `--known-records` options are supported. Import the output with the
+same guarded `health_pipeline import --check-db` / approved write workflow.
+
+OSM `dentist` maps to `dentistry`, and `clinic`/`doctor` to `polyclinic`. Ownership
+is not used as an inclusion filter: public, private and unknown ownership all
+remain eligible. Do not interpret missing ownership tags as proof of state or
+private ownership. A hospital category is supported for explicit, separately
+reviewed uses; the extension command above selects outpatient and dental care.
+Labs, veterinary services, alternative-care tags and unconfigured specialties
+are held out instead of inventing new radii.
+
+Nodes retain their source coordinates. Valid provider polygons use an interior
+point, including for polygons with holes; no street/settlement centres are
+substituted. Missing addresses can be filled from a single unambiguous containing
+OSM building. Its name, contacts and ownership are never copied to its tenants.
+Unnamed providers, closed objects, invalid geometry, insufficient generic
+identity, points outside the existing grid and unresolved municipal identities
+remain in the audit report. A different private provider is not merged merely
+because it shares coordinates with a municipal clinic.
+
+Stable IDs are `openstreetmap_health` plus `node/ID`, `way/ID` or `relation/ID`.
+Duplicate node/area representations use name, address, contact and geometry
+evidence. Distinct nearby branches with different houses, and unrelated
+providers at the same address, retain separate identities. Source object URLs,
+address-building URLs and edit timestamps remain in the staging metadata.
+
+The extract includes private practices absent from accreditation lists, but is
+not a complete current licensing register. OSM may omit providers or retain old
+labels; review uncertain objects and refresh the extract when updating data.
+For the OSM reader tests, add `tests/test_health_osm.py` to the test command.

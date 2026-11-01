@@ -10,7 +10,8 @@ geoalchemy2
 asyncpg
 httpx
 h3>=4,<5
-shapely
+shapely>=2,<3
 pandas
 xlrd>=2,<3
 openpyxl>=3.1,<4
+osmium>=4.3,<5

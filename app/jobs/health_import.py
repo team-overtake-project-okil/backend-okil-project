@@ -42,6 +42,10 @@ def build_plan(rows: list[dict], hex_ids: set[str], health_types: set[str], exis
         old = by_key.get(key)
         if old is None:
             duplicate = next((point for point in physical if point['type'] == value['type']
+                              # The OSM reader resolves node/area duplicates with
+                              # address/contact evidence. Different stable IDs
+                              # at one address can be different practitioners.
+                              and not (point['source'] == value['source'] == 'openstreetmap_health')
                               and normalized(point['name']) == normalized(value['name'])
                               and distance_m(point, value) <= 80), None)
             if duplicate:
