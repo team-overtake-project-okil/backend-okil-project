@@ -80,6 +80,8 @@ class Stop(Base):
 
     source = Column(String(50), nullable=False)
     external_id = Column(String(255), nullable=False)
+    # Назви з’явились пізніше за таблицю: старі рядки лишаються без неї, доки GTFS не перезаллють.
+    name = Column(String(255), nullable=True)
 
     # Геодані збережено напряму
     geom = Column(Geography(geometry_type='POINT', srid=4326), nullable=False)

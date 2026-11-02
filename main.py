@@ -32,4 +32,8 @@ async def on_startup():
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS h3;"))
 
         await conn.run_sync(Base.metadata.create_all)
+        # create_all не додає колонки в уже існуючу таблицю.
+        await conn.execute(text(
+            "ALTER TABLE stops ADD COLUMN IF NOT EXISTS name VARCHAR(255);"
+        ))
     print("Готово!")
