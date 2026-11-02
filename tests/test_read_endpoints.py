@@ -232,6 +232,7 @@ def test_get_hexagons_returns_all_rows(api):
             "mobility": 90,
             "sport": 50,
             "enjoyment": 65,
+            "food": 60,
             "security": 75,
         },
         {
@@ -242,6 +243,7 @@ def test_get_hexagons_returns_all_rows(api):
             "mobility": 60,
             "sport": 85,
             "enjoyment": 70,
+            "food": 80,
             "security": 80,
         },
     ]
@@ -253,11 +255,11 @@ def test_get_hexagons_returns_all_rows(api):
     assert response.json() == [
         {
             "h3_id": "8928308280bffff",
-            "overall_rating": 68.9,
+            "overall_rating": 70.4,
         },
         {
             "h3_id": "8928308280fffff",
-            "overall_rating": 66.34,
+            "overall_rating": 64.7,
         },
     ]
     db.execute.assert_awaited_once()
@@ -265,16 +267,16 @@ def test_get_hexagons_returns_all_rows(api):
 @pytest.mark.parametrize(
     "params, expected_rating",
     [
-        pytest.param({}, 30.48, id="default-weights"),
+        pytest.param({}, 32.17, id="default-weights"),
         pytest.param(
             {"weight_health": 5},
-            46.95,
+            43.53,
             id="higher-health-weight",
         ),
         pytest.param(
             {"weight_health": 0},
-            30.48,
-            id="minimum-health-weight",
+            25.0,
+            id="disabled-health",
         ),
     ],
 )
@@ -290,6 +292,7 @@ def test_get_hexagons_applies_weights(api, params, expected_rating):
             "mobility": 25,
             "sport": 25,
             "enjoyment": 25,
+            "food": 25,
             "security": 25,
         }
     ]
@@ -315,6 +318,7 @@ def test_get_hexagons_applies_weights(api, params, expected_rating):
         "weight_mobility",
         "weight_sport",
         "weight_enjoyment",
+        "weight_food",
         "weight_security",
     ],
 )
@@ -333,3 +337,71 @@ def test_get_hexagons_rejects_invalid_weights(api, parameter, value):
         for error in response.json()["detail"]
     )
     db.execute.assert_not_awaited()
+
+@pytest.mark.parametrize(
+    "food_score, food_weight, expected_rating",
+    [
+        (25, 0, 100.0),
+        (25, 1, 50.0),
+        (25, 3, 35.36),
+        (0, 1, 0.0),
+    ],
+)
+def test_hexagon_endpoints_include_and_apply_food(
+    api, food_score, food_weight, expected_rating
+):
+    client, db, result = api
+
+    row = {
+        "h3_id": "8928308280bffff",
+        "health": 100,
+        "study": 100,
+        "daily": 100,
+        "mobility": 100,
+        "sport": 100,
+        "enjoyment": 100,
+        "food": food_score,
+        "security": 100,
+    }
+    params = {
+        "weight_health": 0,
+        "weight_study": 0,
+        "weight_daily": 0,
+        "weight_mobility": 0,
+        "weight_sport": 0,
+        "weight_enjoyment": 1,
+        "weight_food": food_weight,
+        "weight_security": 0,
+    }
+
+    result.mappings.return_value.all.return_value = [row]
+    result.mappings.return_value.first.return_value = row
+
+    list_response = client.get("/hexagons", params=params)
+
+    assert list_response.status_code == 200
+    assert list_response.json() == [
+        {"h3_id": row["h3_id"], "overall_rating": expected_rating}
+    ]
+
+    detail_response = client.get(
+        f"/hexagons/{row['h3_id']}", params=params
+    )
+
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["h3_id"] == row["h3_id"]
+    assert detail["overall_rating"] == expected_rating
+
+    categories = detail["categories"]
+    assert len(categories) == 8
+    assert {item["category"] for item in categories} == set(row) - {"h3_id"}
+
+    food = next(item for item in categories if item["category"] == "food")
+    assert food["score"] == food_score
+    assert food["enabled"] is (food_weight > 0)
+
+    assert db.execute.await_count == 2
+    for call in db.execute.await_args_list:
+        query = call.args[0]
+        assert "food" in query.selected_columns.keys()

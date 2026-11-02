@@ -23,6 +23,7 @@ SYSTEM_WEIGHTS = {
     "mobility": 0.5,
     "sport": 0.0,
     "enjoyment": 0.0,
+    "food": 0.0,
     "security": 1.0,
 }
 

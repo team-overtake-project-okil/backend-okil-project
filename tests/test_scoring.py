@@ -2,7 +2,11 @@ import math
 
 import pytest
 
-from app.scoring import calculate_overall_rating, normalize_weights
+from app.scoring import (
+    calculate_category_ratings,
+    calculate_overall_rating,
+    normalize_weights,
+)
 
 
 def test_weight_normalization():
@@ -69,3 +73,59 @@ def test_invalid_scores_rejected(bad):
 def test_normalization_rejects_negative():
     with pytest.raises(ValueError):
         normalize_weights({"health": -1})
+
+def test_food_can_be_the_only_enabled_category():
+    result = calculate_overall_rating(
+        {"food": 80},
+        {"food": 1},
+    )
+
+    assert result == 80.0
+
+
+@pytest.mark.parametrize(
+    "food_weight, expected_rating",
+    [
+        (0, 100.0),
+        (1, 50.0),
+        (3, 35.36),
+    ],
+)
+def test_food_weight_changes_overall_rating(food_weight, expected_rating):
+    result = calculate_overall_rating(
+        {"enjoyment": 100, "food": 25},
+        {"enjoyment": 1, "food": food_weight},
+    )
+
+    assert result == expected_rating
+
+
+@pytest.mark.parametrize(
+    "food_weight, expected_enabled",
+    [
+        (0, False),
+        (1, True),
+    ],
+)
+def test_breakdown_keeps_food_with_zero_score(food_weight, expected_enabled):
+    categories = calculate_category_ratings(
+        {"food": 0},
+        {"food": food_weight},
+    )
+
+    assert len(categories) == 8
+    assert {item["category"] for item in categories} == {
+        "health",
+        "study",
+        "daily",
+        "mobility",
+        "sport",
+        "enjoyment",
+        "food",
+        "security",
+    }
+
+    food = next(item for item in categories if item["category"] == "food")
+
+    assert food["score"] == 0.0
+    assert food["enabled"] is expected_enabled

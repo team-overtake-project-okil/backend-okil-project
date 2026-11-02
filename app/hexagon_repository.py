@@ -30,6 +30,7 @@ async def fetch_hexagon(db, h3_id: str) -> dict | None:
             HexTable.mobility,
             HexTable.sport,
             HexTable.enjoyment,
+            HexTable.food,
             HexTable.security,
         ).where(cast(HexTable.h3_id, String) == h3_id)
     )
