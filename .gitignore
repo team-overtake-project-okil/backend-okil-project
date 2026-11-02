@@ -224,3 +224,5 @@ __marimo__/
 .venv/
 __pycache__/
 .idea/
+serp_cache.json
+review_*.csv
