@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_async_db
 from app.models import Route
-from app.route_geojson import build_hex_routes_geojson, hex_boundary_to_wkt
+from app.route_geojson import build_hex_routes_geojson, build_hex_stops_geojson, hex_boundary_to_wkt
 from app.schemas import RouteResponse
 
 router = APIRouter(prefix="/routes", tags=["routes"])
@@ -41,6 +41,35 @@ STOP_POINTS_SQL = text("""
     ORDER BY l.route_id, l.stop_order
 """)
 
+# Зупинки маршрутів, які цей гексагон уже показує (ті самі, що в /routes/geojson).
+# in_hex рахуємо тим самим контуром, що й відбір маршрутів.
+STOPS_FOR_HEX_ROUTES_SQL = text("""
+    WITH hex AS (
+        SELECT ST_GeomFromText(:hex_wkt, 4326) AS geom
+    ),
+    routes_in_hex AS (
+        SELECT DISTINCT r.id, r.name, r.external_id
+        FROM stops s
+        JOIN stop_route_connectable l ON l.stop_id = s.id
+        JOIN routes r ON r.id = l.route_id
+        JOIN hex h ON ST_Intersects(CAST(s.geom AS geometry), h.geom)
+    )
+    SELECT
+        s.id,
+        s.name,
+        ST_X(CAST(s.geom AS geometry)) AS lng,
+        ST_Y(CAST(s.geom AS geometry)) AS lat,
+        ST_Intersects(CAST(s.geom AS geometry), h.geom) AS in_hex,
+        r.id AS route_id,
+        r.name AS route_name,
+        r.external_id AS route_external_id
+    FROM routes_in_hex r
+    JOIN stop_route_connectable l ON l.route_id = r.id
+    JOIN stops s ON s.id = l.stop_id
+    CROSS JOIN hex h
+    ORDER BY s.id, r.id
+""")
+
 
 def _hex_wkt_or_400(h3_id: str) -> str:
     try:
@@ -72,6 +101,21 @@ async def get_hex_routes_geojson(
     fallback_points = [dict(r) for r in (await db.execute(STOP_POINTS_SQL, {"route_ids": route_ids})).mappings().all()]
 
     return build_hex_routes_geojson(routes, segment_rows, fallback_points)
+
+
+# Вище за "/{route_id}", інакше "stops" сприйметься як route_id.
+@router.get("/stops/geojson")
+async def get_hex_stops_geojson(
+        h3_id: str = Query(..., description="H3 ID вибраного гексагона"),
+        db: AsyncSession = Depends(get_async_db),
+):
+    """Зупинки маршрутів гексагона: одна Point-фіча на фізичну зупинку."""
+    hex_wkt = _hex_wkt_or_400(h3_id)
+    rows = [
+        dict(row)
+        for row in (await db.execute(STOPS_FOR_HEX_ROUTES_SQL, {"hex_wkt": hex_wkt})).mappings().all()
+    ]
+    return build_hex_stops_geojson(rows)
 
 
 @router.get("/{route_id}", response_model=RouteResponse)

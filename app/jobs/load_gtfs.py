@@ -201,6 +201,7 @@ async def main(zip_path: str, dry_run: bool = False):
                 {
                     "source": SOURCE_NAME,
                     "external_id": s["external_id"],
+                    "name": s["name"][:255],
                     "type": POINT_TYPE_NAME,
                     "geom": s["geom"],
                     "h3_id": s["h3_id"],
