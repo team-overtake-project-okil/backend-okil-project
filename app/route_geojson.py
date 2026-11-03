@@ -88,3 +88,63 @@ def build_hex_routes_geojson(routes: list, segment_rows: list, fallback_points: 
         })
 
     return {"type": "FeatureCollection", "features": features}
+
+
+def route_number_and_direction(name: str, external_id: str) -> tuple[str, str | None]:
+    """Той самий розбір, що й у лінії маршруту: номер до двокрапки, напрямок після '_'."""
+    number = name.split(":", 1)[0].strip()
+    direction = external_id.rsplit("_", 1)[-1] if "_" in external_id else None
+    return number, direction
+
+
+def build_hex_stops_geojson(rows: list) -> dict:
+    """
+    rows: по рядку на зв'язок зупинка–маршрут
+      id, name, lng, lat, in_hex, route_id, route_name, route_external_id
+
+    Одна Point-фіча на фізичну зупинку. routes — лише передані маршрути
+    (ті, що гексагон уже показує), без повторів.
+    """
+    grouped: dict = {}
+    for row in rows:
+        stop = grouped.get(row["id"])
+        if stop is None:
+            stop = {
+                "id": row["id"],
+                "name": row["name"],
+                "lng": row["lng"],
+                "lat": row["lat"],
+                "in_hex": bool(row["in_hex"]),
+                "routes": {},
+            }
+            grouped[row["id"]] = stop
+        route_id = row["route_id"]
+        if route_id not in stop["routes"]:
+            number, direction = route_number_and_direction(
+                row["route_name"], row["route_external_id"]
+            )
+            stop["routes"][route_id] = {
+                "id": route_id,
+                "number": number,
+                "direction": direction,
+            }
+
+    features = []
+    for stop in sorted(grouped.values(), key=lambda item: item["id"]):
+        if stop["lng"] is None or stop["lat"] is None:
+            continue
+        features.append({
+            "type": "Feature",
+            "properties": {
+                "id": stop["id"],
+                "name": stop["name"],
+                "in_hex": stop["in_hex"],
+                "routes": [stop["routes"][route_id] for route_id in sorted(stop["routes"])],
+            },
+            "geometry": {
+                "type": "Point",
+                "coordinates": [round(float(stop["lng"]), 6), round(float(stop["lat"]), 6)],
+            },
+        })
+
+    return {"type": "FeatureCollection", "features": features}
