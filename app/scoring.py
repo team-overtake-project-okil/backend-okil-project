@@ -67,7 +67,7 @@ def _read_score(category_scores: Mapping[str, float | None], category: str) -> f
 def calculate_overall_rating(
     category_scores: Mapping[str, float | None],
     user_weights: Mapping[str, float],
-) -> float:
+) -> int:
     """Calculate the overall rating on the same 0..100 scale as category scores.
 
     Passing weight 0 disables a category; missing user weight also means disabled.
@@ -83,7 +83,7 @@ def calculate_overall_rating(
             return 0.0
         rating *= score ** normalized_weight
 
-    return round(rating, 2)
+    return math.floor(rating + 0.5)
 
 
 def calculate_category_ratings(
