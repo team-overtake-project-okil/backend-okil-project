@@ -24,7 +24,7 @@ class HexTableResponse(HexTableBase):
 
 class HexagonRatingResponse(BaseModel):
     h3_id: str
-    overall_rating: float = Field(ge=0, le=100)
+    overall_rating: int = Field(ge=0, le=100)
 
 class HexagonWeights(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False)
@@ -48,7 +48,7 @@ class CategoryRating(BaseModel):
  
 class HexagonDetailResponse(BaseModel):
     h3_id: str
-    overall_rating: float = Field(ge=0, le=100)
+    overall_rating: int = Field(ge=0, le=100)
     categories: list[CategoryRating]
 
 # --- PointType ---
