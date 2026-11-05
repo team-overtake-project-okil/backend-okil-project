@@ -405,3 +405,59 @@ def test_hexagon_endpoints_include_and_apply_food(
     for call in db.execute.await_args_list:
         query = call.args[0]
         assert "food" in query.selected_columns.keys()
+
+def test_hex_stops_geojson_returns_grouped_points(api):
+    client, db, result = api
+    result.mappings.return_value.all.return_value = [
+        {
+            "id": 1,
+            "name": "Вокзал",
+            "lng": 24.0,
+            "lat": 49.8,
+            "in_hex": True,
+            "route_id": 1013,
+            "route_name": "А29: Залізничний вокзал (191) → Винники (1022)",
+            "route_external_id": "1014_0",
+        }
+    ]
+
+    response = client.get("/routes/stops/geojson", params={"h3_id": "891e7688377ffff"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {
+                    "id": 1,
+                    "name": "Вокзал",
+                    "in_hex": True,
+                    "routes": [{"id": 1013, "number": "А29", "direction": "0"}],
+                },
+                "geometry": {"type": "Point", "coordinates": [24.0, 49.8]},
+            }
+        ],
+    }
+    db.execute.assert_awaited_once()
+
+
+def test_hex_stops_geojson_empty_hex_is_empty_collection(api):
+    client, db, result = api
+    result.mappings.return_value.all.return_value = []
+
+    response = client.get("/routes/stops/geojson", params={"h3_id": "891e7688377ffff"})
+
+    assert response.status_code == 200
+    assert response.json() == {"type": "FeatureCollection", "features": []}
+    db.execute.assert_awaited_once()
+
+
+def test_hex_stops_geojson_rejects_invalid_h3(api):
+    client, db, _ = api
+
+    response = client.get("/routes/stops/geojson", params={"h3_id": "not-a-cell"})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid h3_id"}
+    db.execute.assert_not_awaited()
