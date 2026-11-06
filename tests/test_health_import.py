@@ -6,8 +6,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from app.jobs.load_health import build_address, categorize
-from app.jobs.health_pipeline import geocode, has_valid_coords, match_candidate, read_csv
+from app.jobs.health.load_health import build_address, categorize
+from app.jobs.health.health_pipeline import geocode, has_valid_coords, match_candidate, read_csv
 from review_health import quality, apply
 
 

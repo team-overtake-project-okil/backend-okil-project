@@ -1,0 +1,208 @@
+[
+  {
+    "category_name": "Щоденні потреби",
+    "score": 88,
+    "max_score": 100,
+    "weight": 0.9,
+    "types_data": [
+      {
+        "type_name": "Аптеки",
+        "num_objects_in_radius": 4,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 150
+      },
+      {
+        "type_name": "Супермаркети",
+        "num_objects_in_radius": 2,
+        "closest_radius_m": 500,
+        "nearest_point_dist_m": 320
+      },
+      {
+        "type_name": "Магазини",
+        "num_objects_in_radius": 7,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 80
+      },
+      {
+        "type_name": "Поштові відділення/поштомати",
+        "num_objects_in_radius": 3,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 110
+      },
+      {
+        "type_name": "Банкомати",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 500,
+        "nearest_point_dist_m": 450
+      }
+    ]
+  },
+  {
+    "category_name": "Розваги",
+    "score": 45,
+    "max_score": 100,
+    "weight": 0.4,
+    "types_data": [
+      {
+        "type_name": "Дитячі майданчики",
+        "num_objects_in_radius": 3,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 90
+      },
+      {
+        "type_name": "Розважальні заклади",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 850
+      },
+      {
+        "type_name": "ТРЦ",
+        "num_objects_in_radius": 0,
+        "closest_radius_m": 1500,
+        "nearest_point_dist_m": 2200
+      },
+      {
+        "type_name": "Кінотеатри",
+        "num_objects_in_radius": 0,
+        "closest_radius_m": 1500,
+        "nearest_point_dist_m": 2800
+      }
+    ]
+  },
+  {
+    "category_name": "Харчування",
+    "score": 75,
+    "max_score": 100,
+    "weight": 0.6,
+    "types_data": [
+      {
+        "type_name": "Кав'ярні",
+        "num_objects_in_radius": 5,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 100
+      },
+      {
+        "type_name": "Пекарні",
+        "num_objects_in_radius": 2,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 210
+      },
+      {
+        "type_name": "Фаст фуд",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 500,
+        "nearest_point_dist_m": 480
+      },
+      {
+        "type_name": "Кафе",
+        "num_objects_in_radius": 3,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 600
+      },
+      {
+        "type_name": "Бари/паби",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 950
+      },
+      {
+        "type_name": "Ресторани",
+        "num_objects_in_radius": 0,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 1400
+      }
+    ]
+  },
+  {
+    "category_name": "Здоров'я",
+    "score": 60,
+    "max_score": 100,
+    "weight": 0.8,
+    "types_data": [
+      {
+        "type_name": "Стоматології",
+        "num_objects_in_radius": 2,
+        "closest_radius_m": 500,
+        "nearest_point_dist_m": 340
+      },
+      {
+        "type_name": "Поліклініка",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 890
+      },
+      {
+        "type_name": "Лікарні",
+        "num_objects_in_radius": 0,
+        "closest_radius_m": 1500,
+        "nearest_point_dist_m": 1850
+      }
+    ]
+  },
+  {
+    "category_name": "Безпека",
+    "score": 95,
+    "max_score": 100,
+    "weight": 1.0,
+    "types_data": [
+      {
+        "type_name": "Укриття",
+        "num_objects_in_radius": 4,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 65
+      }
+    ]
+  },
+  {
+    "category_name": "Спорт",
+    "score": 35,
+    "max_score": 100,
+    "weight": 0.7,
+    "types_data": [
+      {
+        "type_name": "Спортивний майданчик",
+        "num_objects_in_radius": 2,
+        "closest_radius_m": 300,
+        "nearest_point_dist_m": 200
+      },
+      {
+        "type_name": "Спортзал",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 850
+      },
+      {
+        "type_name": "Стадіон",
+        "num_objects_in_radius": 0,
+        "closest_radius_m": 1500,
+        "nearest_point_dist_m": 1900
+      },
+      {
+        "type_name": "Басейн",
+        "num_objects_in_radius": 0,
+        "closest_radius_m": 1500,
+        "nearest_point_dist_m": 3200
+      }
+    ]
+  },
+  {
+    "category_name": "Навчання",
+    "score": 82,
+    "max_score": 100,
+    "weight": 0.85,
+    "types_data": [
+      {
+        "type_name": "Дитячий садок",
+        "num_objects_in_radius": 2,
+        "closest_radius_m": 500,
+        "nearest_point_dist_m": 250
+      },
+      {
+        "type_name": "Школа",
+        "num_objects_in_radius": 1,
+        "closest_radius_m": 1000,
+        "nearest_point_dist_m": 600
+      }
+    ]
+  }
+]

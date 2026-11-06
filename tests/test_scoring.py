@@ -88,7 +88,7 @@ def test_food_can_be_the_only_enabled_category():
     [
         (0, 100.0),
         (1, 50.0),
-        (3, 35.36),
+        (3, 35),
     ],
 )
 def test_food_weight_changes_overall_rating(food_weight, expected_rating):

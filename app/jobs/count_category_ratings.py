@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import async_session_maker
 from app.models import HexTable, Point, PointType, Stop, StopRouteConnectable
+from app.rounding import round_final
 
 CHUNK_SIZE = 2000
 
@@ -147,7 +148,7 @@ async def main(dry_run: bool = False):
                     )
                     cat_score += weight * score
 
-                hex_scores[category] = int(round(cat_score))
+                hex_scores[category] = round_final(cat_score)
 
             # Розрахунок категорії Mobility (Інші POI + GTFS зв'язність)
             mobility_types = categories_map.get("mobility", [])
@@ -215,9 +216,9 @@ async def main(dry_run: bool = False):
                 gtfs_score = min(100.0, (math.log1p(raw_network_score) / math.log(20)) * 100.0)
 
                 total_mobility = other_mobility_score + (weight_per_component * gtfs_score)
-                hex_scores["mobility"] = int(round(min(100.0, total_mobility)))
+                hex_scores["mobility"] = round_final(min(100.0, total_mobility))
             else:
-                hex_scores["mobility"] = int(round(other_mobility_score))
+                hex_scores["mobility"] = round_final(other_mobility_score)
 
             updates.append(hex_scores)
 

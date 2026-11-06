@@ -15,6 +15,7 @@ PROPOSED, NOT YET TEAM-APPROVED POLICY:
 
 import math
 from collections.abc import Mapping
+from app.rounding import round_final
 
 SYSTEM_WEIGHTS = {
     "health": 1.0,
@@ -74,16 +75,16 @@ def calculate_overall_rating(
     """
     normalized_weights = _normalized_user_weights(user_weights)
     if not normalized_weights:
-        return 0.0
+        return 0
 
     rating = 1.0
     for category, normalized_weight in normalized_weights.items():
         score = _read_score(category_scores, category)
         if score == 0.0:
-            return 0.0
+            return 0
         rating *= score ** normalized_weight
 
-    return math.floor(rating + 0.5)
+    return round_final(rating)
 
 
 def calculate_category_ratings(
@@ -105,7 +106,7 @@ def calculate_category_ratings(
         result.append(
             {
                 "category": category,
-                "score": score,
+                "score": round_final(score),
                 "enabled": enabled,
                 "weight": round(weight, 4) if enabled else 0.0,
                 "adjusted_score": round(score ** weight, 2) if enabled else None,

@@ -4,7 +4,7 @@ This tool intentionally does not geocode or write to PostgreSQL. The source has
 no coordinates; importing fictitious locations would corrupt H3 ratings.
 
 Usage:
-    python -m app.jobs.load_health --file "data/health.xls" --output "tmp/health-preview.csv"
+    python -m app.jobs.health.load_health --file "data/health.xls" --output "tmp/health-preview.csv"
 """
 from __future__ import annotations
 

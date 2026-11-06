@@ -40,10 +40,11 @@ class HexagonWeights(BaseModel):
 
 class CategoryRating(BaseModel):
     category: str
-    score: float = Field(ge=0, le=100)        # raw score from DB
+    score: int = Field(ge=0, le=100)          # rounded score for display
     enabled: bool                             # False when user weight == 0
     weight: float = Field(ge=0, le=1)         # normalized weight
     adjusted_score: float | None = None       # score ** weight (None if disabled)
+    explanation: str | None = None
  
  
 class HexagonDetailResponse(BaseModel):
