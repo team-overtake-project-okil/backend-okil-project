@@ -15,3 +15,4 @@ pandas
 xlrd>=2,<3
 openpyxl>=3.1,<4
 osmium>=4.3,<5
+Jinja2>=3.1,<4

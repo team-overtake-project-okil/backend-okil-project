@@ -7,6 +7,7 @@ from app.database import get_async_db
 from app.hexagon_repository import fetch_hexagon, fetch_hexagons
 from app.schemas import HexagonDetailResponse, HexagonRatingResponse, HexagonWeights
 from app.scoring import calculate_category_ratings, calculate_overall_rating
+from app.category_narratives.service import fetch_hexagon_explanations
 
 
 router = APIRouter(prefix="/hexagons", tags=["hexagons"])
@@ -41,8 +42,13 @@ async def get_hexagon(
 
     user_weights = weights.model_dump()
 
+    explanations = await fetch_hexagon_explanations(db, hexagon, user_weights)
+    categories = [
+        {**rating, **explanations[rating["category"]]}
+        for rating in calculate_category_ratings(hexagon, user_weights)
+    ]
     return {
         "h3_id": hexagon["h3_id"],
         "overall_rating": calculate_overall_rating(hexagon, user_weights),
-        "categories": calculate_category_ratings(hexagon, user_weights),
+        "categories": categories,
     }

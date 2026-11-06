@@ -1,5 +1,5 @@
 import unittest
-from app.jobs.health_pipeline import (
+from app.jobs.health.health_pipeline import (
     has_valid_coords,
     match_candidate,
     validate_reviewed,
