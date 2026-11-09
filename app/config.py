@@ -1,8 +1,11 @@
+from pydantic import PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     DB_URL: str 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    CHAT_SESSION_TTL_SECONDS: PositiveInt = 1800
     SERPAPI_KEYS: str = ""
     @property
     def DATABASE_URL_asyncpg(self):
