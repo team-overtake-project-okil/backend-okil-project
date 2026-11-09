@@ -75,12 +75,36 @@ To try the classifier interactively from the repository root, run:
 .\.venv\Scripts\python.exe -m app.try_intent_classifier
 ```
 
-The first launch loads the local model. Enter questions to see recognized
-project-related parts and parts that do not match an intent. For example,
-`поясни оцінку цього гекса і дай рецепт сирників` should separate the hex-score
-question from the unrelated recipe request. The parser splits at sentence
-punctuation and common task connectors; it is a lightweight first version, not
-a general-purpose language parser.
+For full AI answers, add a Groq API key to your local `.env` file:
+
+```dotenv
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=openai/gpt-oss-20b
+```
+
+The configured default is `openai/gpt-oss-20b`. Set `GROQ_MODEL` to another
+model ID currently available in your Groq account if desired. Groq's active
+models are listed in the [Groq model catalog](https://console.groq.com/docs/models).
+The tester reports Groq API errors, including rate limits, rather than
+returning an incomplete answer. The API key is sent only to Groq and must not
+be committed.
+
+The first launch loads the local intent model. Enter questions to see
+recognized project-related parts and parts that are ignored. For example,
+`поясни оцінку цього гекса і дай рецепт сирників` separates the hex-score
+question from the unrelated recipe request. For POI and hex-score questions,
+the tester asks for the hex's 15-character H3 ID unless it is included in the
+question. POI records for that exact H3 cell, with readable type and category
+names, are sent to Groq so the model can describe them naturally. Its
+prompt asks it not to invent places or add boilerplate about absent types. If
+the cell has no POI records, the tester reports that directly without calling
+the model. Hex-score questions fetch facts from PostgreSQL and send them to
+Groq. Project-info questions use the category and POI-type catalog from
+PostgreSQL. Unrelated parts are not sent to Groq.
+
+Only the selected question and the relevant facts returned from PostgreSQL
+are sent to Groq. This CLI is for local experimentation; it does not add
+an API endpoint to the backend.
 
 Parts scoring below `0.2` are reported as unrelated; pass another
 `min_similarity` to `create_default_intent_classifier` to tune the threshold.

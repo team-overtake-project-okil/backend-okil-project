@@ -4,6 +4,9 @@ class Settings(BaseSettings):
     DB_URL: str 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
     SERPAPI_KEYS: str = ""
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "openai/gpt-oss-20b"
+
     @property
     def DATABASE_URL_asyncpg(self):
         url = self.DB_URL
