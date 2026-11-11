@@ -38,7 +38,7 @@ def test_hexagon_list_returns_only_rating_and_includes_mobility(monkeypatch):
     assert response.json() == [{"h3_id": "hex-a", "overall_rating": 72}]
 
 
-def test_detail_keeps_existing_fields_and_adds_routes_separately(monkeypatch):
+def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatch):
     client, db = _client(monkeypatch)
     result = Mock()
     result.mappings.return_value.first.return_value = {"lat": 49.84, "lon": 24.03}
@@ -61,7 +61,7 @@ def test_detail_keeps_existing_fields_and_adds_routes_separately(monkeypatch):
         AsyncMock(return_value={"h3_id": "hex-a", "routes": [{"transport_mode": "bus"}]}),
     )
     params = {f"weight_{category}": 0 for category in SYSTEM_WEIGHTS if category != "mobility"}
-    params.update(weight_mobility=1, include_routes="true")
+    params["weight_mobility"] = 1
 
     response = client.get("/hexagons/hex-a", params=params)
 
@@ -71,3 +71,6 @@ def test_detail_keeps_existing_fields_and_adds_routes_separately(monkeypatch):
     assert body["routes"] == [{"transport_mode": "bus"}]
     assert next(item for item in body["categories"] if item["category"] == "mobility")["score"] == 72
     assert {"h3_id", "overall_rating", "categories", "routes"} == set(body)
+    hexagons.get_here_routes.assert_awaited_once_with(
+        "hex-a", (49.84, 24.03), "bus", hexagons.LVIV_CENTER
+    )

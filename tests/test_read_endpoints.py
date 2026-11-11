@@ -348,12 +348,22 @@ def test_get_hexagons_rejects_invalid_weights(api, parameter, value):
     ],
 )
 def test_hexagon_endpoints_include_and_apply_food(
-    api, food_score, food_weight, expected_rating
+    api, food_score, food_weight, expected_rating, monkeypatch
 ):
     client, db, result = api
+    from routers import hexagons
+
+    monkeypatch.setattr(hexagons.settings, "HERE_ROUTING_API_KEY", "test-key")
+    monkeypatch.setattr(
+        hexagons,
+        "get_here_routes",
+        AsyncMock(return_value={"routes": []}),
+    )
 
     row = {
         "h3_id": "8928308280bffff",
+        "lat": 49.84,
+        "lon": 24.03,
         "health": 100,
         "study": 100,
         "daily": 100,
@@ -396,13 +406,15 @@ def test_hexagon_endpoints_include_and_apply_food(
 
     categories = detail["categories"]
     assert len(categories) == 8
-    assert {item["category"] for item in categories} == set(row) - {"h3_id"}
+    assert {item["category"] for item in categories} == {
+        "health", "study", "daily", "sport", "enjoyment", "food", "security", "mobility"
+    }
 
     food = next(item for item in categories if item["category"] == "food")
     assert food["score"] == food_score
     assert food["enabled"] is (food_weight > 0)
 
-    assert db.execute.await_count == 3
+    assert db.execute.await_count == 4
     for call in db.execute.await_args_list[:2]:
         query = call.args[0]
         assert "food" in query.selected_columns.keys()

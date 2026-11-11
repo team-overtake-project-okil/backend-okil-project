@@ -9,14 +9,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
 from app.database import get_async_db
+from app.here_routes_service import get_here_routes
 from app.hexagon_repository import fetch_hexagon, fetch_hexagons
-from app.mobility_score_service import LVIV_CENTER, get_here_routes, get_mobility_scores
+from app.mobility_score_service import get_mobility_scores
+from app.mobility_transport import LVIV_CENTER
 from app.models import HexTable
 from app.schemas import HexagonDetailResponse, HexagonRatingResponse, HexagonWeights
 from app.scoring import calculate_category_ratings, calculate_overall_rating
 
 
 router = APIRouter(prefix="/hexagons", tags=["hexagons"])
+
+
+def _here_error_detail(error: httpx.HTTPStatusError) -> str:
+    try:
+        body = error.response.json()
+    except ValueError:
+        body = {}
+    message = " ".join(
+        body[key].strip()
+        for key in ("title", "cause", "code", "error_description")
+        if isinstance(body, dict)
+        and isinstance(body.get(key), str)
+        and body[key].strip()
+    )
+    detail = f"HERE API returned HTTP {error.response.status_code}"
+    return f"{detail}: {message[:300]}" if message else detail
 
 
 @router.get("", response_model=list[HexagonRatingResponse])
@@ -74,9 +92,6 @@ async def get_hexagon(
     anchor_lat: list[float] | None = Query(default=None),
     anchor_lon: list[float] | None = Query(default=None),
     weight: list[float] | None = Query(default=None),
-    include_routes: bool = Query(default=False),
-    origin_lat: float | None = Query(default=None),
-    origin_lon: float | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
     hexagon = await fetch_hexagon(db, h3_id)
@@ -105,31 +120,31 @@ async def get_hexagon(
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="TravelTime API request failed") from exc
 
-    routes = []
-    if include_routes:
-        if not settings.HERE_ROUTING_API_KEY:
-            raise HTTPException(status_code=503, detail="HERE Routing API is not configured")
-        result = await db.execute(
-            select(
-                HexTable.geom.cast(Geometry).ST_Y().label("lat"),
-                HexTable.geom.cast(Geometry).ST_X().label("lon"),
-            ).where(cast(HexTable.h3_id, String) == h3_id)
+    if not settings.HERE_ROUTING_API_KEY:
+        raise HTTPException(status_code=503, detail="HERE API is not configured")
+    result = await db.execute(
+        select(
+            HexTable.geom.cast(Geometry).ST_Y().label("lat"),
+            HexTable.geom.cast(Geometry).ST_X().label("lon"),
+        ).where(cast(HexTable.h3_id, String) == h3_id)
+    )
+    row = result.mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Hexagon not found")
+    try:
+        route_result = await get_here_routes(
+            h3_id, (float(row["lat"]), float(row["lon"])), transportation, LVIV_CENTER
         )
-        row = result.mappings().first()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Hexagon not found")
-        if (origin_lat is None) != (origin_lon is None):
-            raise HTTPException(status_code=400, detail="Provide both origin_lat and origin_lon")
-        try:
-            route_result = await get_here_routes(
-                h3_id, (float(row["lat"]), float(row["lon"])), transportation,
-                (origin_lat, origin_lon) if origin_lat is not None else LVIV_CENTER,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="HERE Routing API request failed") from exc
-        routes = route_result["routes"]
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=_here_error_detail(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"HERE API request failed ({type(exc).__name__})",
+        ) from exc
+    routes = route_result["routes"]
 
     hexagon = {**hexagon, "mobility": mobility_score}
     user_weights = weights.model_dump()

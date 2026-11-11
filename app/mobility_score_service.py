@@ -6,25 +6,9 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.config import settings
+from app.mobility_transport import LVIV_CENTER, mobility_modes
 
 TRAVELTIME_URL = "https://api.traveltimeapp.com/v4/h3"
-HERE_URL = "https://router.hereapi.com/v8/routes"
-LVIV_CENTER = (49.8397, 24.0297)
-
-
-def _modes(transportation: str) -> list[str]:
-    values = [value.strip().lower().replace("_", "") for value in transportation.split(",")]
-    modes = []
-    for value in values:
-        if value in {"both", "busandcar", "carandbus"}:
-            modes.extend(["bus", "car"])
-        elif value in {"bus", "publictransport"}:
-            modes.append("bus")
-        elif value == "car":
-            modes.append("car")
-        else:
-            raise ValueError("transportation must be bus, car, or both")
-    return list(dict.fromkeys(modes))
 
 
 def _departure_times() -> list[datetime]:
@@ -39,7 +23,14 @@ def _departure_times() -> list[datetime]:
     return times
 
 
-def _scores_by_search(payload: dict[str, Any], tau: float) -> dict[str, dict[str, float]]:
+def _travel_time_score(seconds: float, tau: float, full_score_seconds: int) -> float:
+    excess_seconds = max(0.0, seconds - full_score_seconds)
+    return 100 * math.exp(-excess_seconds / tau)
+
+
+def _scores_by_search(
+    payload: dict[str, Any], tau: float, full_score_seconds: int
+) -> dict[str, dict[str, float]]:
     scores: dict[str, dict[str, float]] = {}
     for result in payload.get("results", []):
         search_scores = {}
@@ -47,8 +38,8 @@ def _scores_by_search(payload: dict[str, Any], tau: float) -> dict[str, dict[str
             properties = cell.get("properties", {})
             seconds = properties.get("mean")
             cell_id = cell.get("id") or cell.get("h3_id")
-            if cell_id and isinstance(seconds, (int, float)):
-                search_scores[str(cell_id)] = 100 * math.exp(-seconds / tau)
+            if cell_id and isinstance(seconds, (int, float)) and math.isfinite(seconds):
+                search_scores[str(cell_id)] = _travel_time_score(seconds, tau, full_score_seconds)
         scores[result.get("search_id", "")] = search_scores
     return scores
 
@@ -70,7 +61,7 @@ async def get_mobility_scores(
     ):
         raise ValueError("anchor coordinates and weights must be finite; weights must be positive")
 
-    modes = _modes(transportation)
+    modes = mobility_modes(transportation)
     departures = _departure_times()
     headers = {
         "Content-Type": "application/json",
@@ -102,7 +93,14 @@ async def get_mobility_scores(
                     json={"resolution": 9, "departure_searches": searches, "properties": ["mean"]},
                 )
                 response.raise_for_status()
-                scores_by_mode.append(_scores_by_search(response.json(), tau))
+                full_score_seconds = (
+                    settings.TRAVELTIME_BUS_FULL_SCORE_SECONDS
+                    if mode == "bus"
+                    else settings.TRAVELTIME_CAR_FULL_SCORE_SECONDS
+                )
+                scores_by_mode.append(
+                    _scores_by_search(response.json(), tau, full_score_seconds)
+                )
 
         per_anchor = {}
         for hex_id in hex_ids:
@@ -118,45 +116,19 @@ async def get_mobility_scores(
 
     total_weight = sum(weight for _, _, weight in anchors)
     return {
-        hex_id: (
-            0.0
-            if any(scores[hex_id] <= 0 for scores in scores_by_anchor)
-            else math.exp(
-                sum(
-                    (weight / total_weight) * math.log(scores[hex_id])
-                    for (_, _, weight), scores in zip(anchors, scores_by_anchor)
-                )
-            )
+        hex_id: min(
+            100.0,
+            max(
+                0.0,
+                0.0
+                if any(scores[hex_id] <= 0 for scores in scores_by_anchor)
+                else math.exp(
+                    sum(
+                        (weight / total_weight) * math.log(scores[hex_id])
+                        for (_, _, weight), scores in zip(anchors, scores_by_anchor)
+                    )
+                ),
+            ),
         )
         for hex_id in hex_ids
     }
-
-
-async def get_here_routes(
-    h3_id: str,
-    destination: tuple[float, float],
-    transportation: str = "bus",
-    origin: tuple[float, float] = LVIV_CENTER,
-) -> dict[str, Any]:
-    if not settings.HERE_ROUTING_API_KEY:
-        raise RuntimeError("HERE Routing API key is not configured")
-
-    routes = []
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        for mode in _modes(transportation):
-            response = await client.get(
-                HERE_URL,
-                params={
-                    "apiKey": settings.HERE_ROUTING_API_KEY,
-                    "transportMode": mode,
-                    "origin": f"{origin[0]},{origin[1]}",
-                    "destination": f"{destination[0]},{destination[1]}",
-                    "return": "polyline,summary,travelSummary,instructions",
-                },
-            )
-            response.raise_for_status()
-            routes.extend(
-                {"transport_mode": mode, **route}
-                for route in response.json().get("routes", [])
-            )
-    return {"h3_id": h3_id, "routes": routes}

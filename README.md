@@ -15,10 +15,15 @@ HERE_ROUTING_API_KEY=your-here-api-key
 ```
 
 Get the first two values from your TravelTime API account and the HERE key from
-your HERE developer project. `TRAVELTIME_TIME_CONSTANT_SECONDS` and
-`TRAVELTIME_MAX_SEARCH_SECONDS` are optional tuning settings already shown in
-`.env.example`. Restart the backend after editing `.env`. Do not commit or share
-`.env`; it is git-ignored.
+your HERE developer project, with both HERE Routing and Public Transit API v8
+enabled for the key. HERE car details use Routing API; bus details use Public
+Transit API routes, and no road-bus route is substituted when transit returns no
+route. If HERE has no bus route for the requested trip, no bus route is included
+in the `routes` array. TravelTime full-score thresholds default to 30 minutes
+for bus and 20 minutes for car; `TRAVELTIME_TIME_CONSTANT_SECONDS` and
+`TRAVELTIME_MAX_SEARCH_SECONDS` are additional tuning settings shown in
+`.env.example`. Restart the backend after editing `.env`. Do not commit or
+share `.env`; it is git-ignored.
 
 ## Frontend access (CORS)
 
