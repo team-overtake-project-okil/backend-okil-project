@@ -8,7 +8,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
 
 from app.chat_protocol import ChatProtocolError, parse_message, parse_question, parse_session_token
-from app.chat_service import REPLY_TIMEOUT_SECONDS, generate_reply
+from app.chat_service import ChatReplyError, REPLY_TIMEOUT_SECONDS, generate_reply
 from app.chat_sessions import ChatSessionError, ChatSessionStore
 from app.config import settings
 
@@ -41,6 +41,8 @@ async def run_reply(
                 answer = await asyncio.wait_for(generate_reply(question, history), REPLY_TIMEOUT_SECONDS)
             except asyncio.TimeoutError:
                 raise ChatSessionError("reply_timeout", "The reply took too long.") from None
+            except ChatReplyError as exc:
+                raise ChatSessionError(exc.code, str(exc)) from None
             except Exception as exc:
                 logger.error("Chat reply generation failed (%s)", type(exc).__name__)
                 raise ChatSessionError("reply_failed", "The reply could not be prepared.") from None

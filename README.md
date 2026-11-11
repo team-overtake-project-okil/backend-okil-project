@@ -82,10 +82,20 @@ The backend sends events for the same `requestId`:
 ```json
 {"type":"message.accepted","requestId":"req_1"}
 {"type":"answer.status","requestId":"req_1","stage":"generating"}
-{"type":"answer.completed","requestId":"req_1","text":"Test reply: Hello"}
+{"type":"answer.completed","requestId":"req_1","text":"<AI answer>"}
 ```
 
-The backend currently uses a test reply service. It saves the completed turn
+The chat adapter uses the AI classifier and `answer_intent` service from
+[PR #69](https://github.com/team-overtake-project-okil/backend-okil-project/pull/69).
+This branch includes the two unchanged AI modules from that PR; their Python
+dependencies, intent model and `GROQ_API_KEY` must be configured. Until then the socket returns a
+readable `ai_unavailable` error; it never substitutes a test reply.
+See [chat AI integration](docs/chat_ai_integration.md) for setup, context,
+errors, source provenance and verification. Optional `CHAT_PRELOAD_AI=true`
+loads the classifier during startup so a cold load does not consume the first
+reply's deadline.
+
+It saves the completed turn
 before sending `answer.completed`. One reply can run per session at a time,
 including when two sockets share a token. The reply times out after 30 seconds
 and is cancelled when the socket disconnects. Only completed turns appear in
