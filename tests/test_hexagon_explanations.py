@@ -126,7 +126,7 @@ def test_detail_endpoint_returns_only_explanation_and_stored_rating(api, monkeyp
     monkeypatch.setattr(job, "calculate_distance_score", unexpected_calculation)
     monkeypatch.setattr(job, "get_distance_meters", unexpected_calculation)
     db.execute.side_effect = [result(first=snapshot()), result(rows())]
-    status, body = asyncio.run(request(app, "/hexagons/891e7688377ffff", b"weight_daily=0"))
+    status, body = asyncio.run(request(app, "/hexagons/891e7688377ffff", b"weight_daily=0&weight_mobility=0"))
     assert status == 200
     assert len(body["categories"]) == 8
     daily = next(item for item in body["categories"] if item["category"] == "daily")
@@ -158,7 +158,7 @@ def test_missing_hexagon_skips_explanation_query(api):
 def test_list_endpoint_does_not_query_explanation_data(api):
     app, db = api
     db.execute.return_value = result([snapshot()])
-    status, body = asyncio.run(request(app, "/hexagons"))
+    status, body = asyncio.run(request(app, "/hexagons", b"weight_mobility=0"))
     assert status == 200
     assert set(body[0]) == {"h3_id", "overall_rating"}
     db.execute.assert_awaited_once()

@@ -21,7 +21,6 @@ class HexTable(Base):
     health = Column(Integer, default=0, nullable=False)
     study = Column(Integer, default=0, nullable=False)
     daily = Column(Integer, default=0, nullable=False)
-    mobility = Column(Integer, default=0, nullable=False)
     sport = Column(Integer, default=0, nullable=False)
     enjoyment = Column(Integer, default=0, nullable=False)
     food = Column(Integer, default=0, nullable=False)

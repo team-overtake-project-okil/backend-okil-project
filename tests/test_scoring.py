@@ -34,6 +34,10 @@ def test_single_enabled_category():
     assert calculate_overall_rating({"health": 74}, {"health": 2}) == 74.0
 
 
+def test_mobility_score_contributes_to_overall_rating():
+    assert calculate_overall_rating({"mobility": 73}, {"mobility": 1}) == 73.0
+
+
 def test_zero_weight_disables_low_scoring_category():
     assert calculate_overall_rating(
         {"health": 74, "daily": 0},
@@ -118,11 +122,11 @@ def test_breakdown_keeps_food_with_zero_score(food_weight, expected_enabled):
         "health",
         "study",
         "daily",
-        "mobility",
         "sport",
         "enjoyment",
         "food",
         "security",
+        "mobility",
     }
 
     food = next(item for item in categories if item["category"] == "food")

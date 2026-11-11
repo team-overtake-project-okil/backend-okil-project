@@ -214,7 +214,7 @@ def test_get_hexagons_returns_empty_list(api):
 
     result.mappings.return_value.all.return_value = []
 
-    response = client.get("/hexagons")
+    response = client.get("/hexagons", params={"weight_mobility": 0})
 
     assert response.status_code == 200
     assert response.json() == []
@@ -249,17 +249,17 @@ def test_get_hexagons_returns_all_rows(api):
     ]
     result.mappings.return_value.all.return_value = rows
 
-    response = client.get("/hexagons")
+    response = client.get("/hexagons", params={"weight_mobility": 0})
 
     assert response.status_code == 200
     assert response.json() == [
         {
             "h3_id": "8928308280bffff",
-            "overall_rating": 70.4,
+            "overall_rating": 68,
         },
         {
             "h3_id": "8928308280fffff",
-            "overall_rating": 64.7,
+            "overall_rating": 65,
         },
     ]
     db.execute.assert_awaited_once()
@@ -267,10 +267,10 @@ def test_get_hexagons_returns_all_rows(api):
 @pytest.mark.parametrize(
     "params, expected_rating",
     [
-        pytest.param({}, 32.17, id="default-weights"),
+        pytest.param({}, 33, id="default-weights"),
         pytest.param(
             {"weight_health": 5},
-            43.53,
+            46,
             id="higher-health-weight",
         ),
         pytest.param(
@@ -297,7 +297,7 @@ def test_get_hexagons_applies_weights(api, params, expected_rating):
         }
     ]
 
-    response = client.get("/hexagons", params=params)
+    response = client.get("/hexagons", params={**params, "weight_mobility": 0})
 
     assert response.status_code == 200
     assert response.json() == [
@@ -343,7 +343,7 @@ def test_get_hexagons_rejects_invalid_weights(api, parameter, value):
     [
         (25, 0, 100.0),
         (25, 1, 50.0),
-        (25, 3, 35.36),
+        (25, 3, 35),
         (0, 1, 0.0),
     ],
 )
@@ -384,6 +384,7 @@ def test_hexagon_endpoints_include_and_apply_food(
         {"h3_id": row["h3_id"], "overall_rating": expected_rating}
     ]
 
+    result.mappings.return_value.all.return_value = []
     detail_response = client.get(
         f"/hexagons/{row['h3_id']}", params=params
     )
@@ -401,8 +402,8 @@ def test_hexagon_endpoints_include_and_apply_food(
     assert food["score"] == food_score
     assert food["enabled"] is (food_weight > 0)
 
-    assert db.execute.await_count == 2
-    for call in db.execute.await_args_list:
+    assert db.execute.await_count == 3
+    for call in db.execute.await_args_list[:2]:
         query = call.args[0]
         assert "food" in query.selected_columns.keys()
 
