@@ -11,7 +11,13 @@ class Settings(BaseSettings):
     SERPAPI_KEYS: str = ""
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
-
+    TRAVELTIME_API_KEY: str = ""
+    TRAVELTIME_APP_ID: str = ""
+    TRAVELTIME_TIME_CONSTANT_SECONDS: int = 1500
+    TRAVELTIME_BUS_FULL_SCORE_SECONDS: PositiveInt = 1800
+    TRAVELTIME_CAR_FULL_SCORE_SECONDS: PositiveInt = 1200
+    TRAVELTIME_MAX_SEARCH_SECONDS: int = 14400
+    HERE_ROUTING_API_KEY: str = ""
     @property
     def DATABASE_URL_asyncpg(self):
         url = self.DB_URL

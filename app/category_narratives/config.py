@@ -2,8 +2,8 @@
 
 CATEGORY_NAMES = {
     "health": "Здоров'я", "study": "Навчання", "daily": "Щоденні потреби",
-    "mobility": "Мобільність", "sport": "Спорт", "enjoyment": "Розваги",
-    "food": "Харчування", "security": "Безпека",
+    "sport": "Спорт", "enjoyment": "Розваги",
+    "food": "Харчування", "security": "Безпека", "mobility": "Мобільність",
 }
 
 # Codes verified against public.point_types, okil_new_db, 2026-11-06.

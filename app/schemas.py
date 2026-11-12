@@ -1,5 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional
+from typing import Any, Optional
 
 
 class HexTableBase(BaseModel):
@@ -7,10 +7,9 @@ class HexTableBase(BaseModel):
     health: int = 0
     study: int = 0
     daily: int = 0
-    mobility: int = 0
     sport: int = 0
     enjoyment: int = 0
-    food: int = 0 
+    food: int = 0
     security: int = 0
 
 
@@ -32,11 +31,11 @@ class HexagonWeights(BaseModel):
     health: float = Field(default=1.0, ge=0, le=5, alias="weight_health")
     study: float = Field(default=1.0, ge=0, le=5, alias="weight_study")
     daily: float = Field(default=1.0, ge=0, le=5, alias="weight_daily")
-    mobility: float = Field(default=1.0, ge=0, le=5, alias="weight_mobility")
     sport: float = Field(default=1.0, ge=0, le=5, alias="weight_sport")
     enjoyment: float = Field(default=1.0, ge=0, le=5, alias="weight_enjoyment")
     food: float = Field(default=1.0, ge=0, le=5, alias="weight_food")
     security: float = Field(default=1.0, ge=0, le=5, alias="weight_security")
+    mobility: float = Field(default=1.0, ge=0, le=5, alias="weight_mobility")
 
 class CategoryRating(BaseModel):
     category: str
@@ -51,6 +50,7 @@ class HexagonDetailResponse(BaseModel):
     h3_id: str
     overall_rating: int = Field(ge=0, le=100)
     categories: list[CategoryRating]
+    routes: list[dict[str, Any]] = Field(default_factory=list)
 
 # --- PointType ---
 class PointTypeBase(BaseModel):

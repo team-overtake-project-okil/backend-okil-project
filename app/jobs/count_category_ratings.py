@@ -22,6 +22,8 @@ TOP_N_POINTS = 3
 
 def get_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Обчислює відстань у метрах між двома точками."""
+    if None in (lat1, lon1, lat2, lon2):
+        return float("inf")
     dy = (lat1 - lat2) * METERS_PER_LAT
     dx = (lon1 - lon2) * METERS_PER_LON
     return math.hypot(dx, dy)
@@ -29,16 +31,23 @@ def get_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> f
 
 def calculate_distance_score(d: float, r1: float, r2: float, r3: float) -> float:
     """Обчислює бали (0..100) залежно від відстані d та радіусів r1, r2, r3."""
-    if d is None or math.isinf(d):
+    if d is None or not math.isfinite(d):
         return 0.0
+
+    # Радіуси можуть бути нульовими або некоректно впорядкованими в конфігурації.
+    r1 = max(0.0, r1 or 0.0)
+    r2 = max(r1, r2 or 0.0)
+    r3 = max(r2, r3 or 0.0)
 
     if d <= r1:
         return 100.0
-    elif d <= r2:
+    elif r2 > r1 and d <= r2:
         return 100.0 - 40.0 * ((d - r1) / (r2 - r1))
-    elif d <= r3:
+    elif r3 > r2 and d <= r3:
         return 60.0 - 40.0 * ((d - r2) / (r3 - r2))
     else:
+        if r3 == 0:
+            return 0.0
         score = 20.0 * math.exp(-(d - r3) / r3)
         return max(0.0, score)
 
@@ -170,69 +179,6 @@ async def main(dry_run: bool = False):
                     cat_score += weight * score
 
                 hex_scores[category] = round_final(cat_score)
-
-            # Розрахунок категорії Mobility — тільки громадський транспорт (GTFS)
-            if all_stops:
-                pt_config = point_types_by_name.get("gtfs_stop")
-                r1 = get_radius(pt_config, "radius_of_influence_1", 200) if pt_config else 200
-                r2 = get_radius(pt_config, "radius_of_influence_2", 400) if pt_config else 400
-                r3 = get_radius(pt_config, "radius_of_influence_3", 700) if pt_config else 700
-
-                candidate_stops = []
-                closest_stop_overall = None
-                min_dist_overall = float("inf")
-
-                for s in all_stops:
-                    dist = get_distance_meters(h_lat, h_lon, s["lat"], s["lon"])
-
-                    if dist < min_dist_overall:
-                        min_dist_overall = dist
-                        closest_stop_overall = (s, dist)
-
-                    if dist <= r3:
-                        w_dist = calculate_distance_score(dist, r1, r2, r3) / 100.0
-                        candidate_stops.append((s, dist, w_dist))
-
-                penalty_factor = 1.0
-                if not candidate_stops and closest_stop_overall:
-                    s, dist = closest_stop_overall
-                    w_dist = calculate_distance_score(dist, r1, r2, r3) / 100.0
-                    penalty_factor = 0.3
-                    candidate_stops.append((s, dist, w_dist))
-
-                reachable_destinations = {}
-
-                for s, dist, w_dist in candidate_stops:
-                    for r_id in s["route_ids"]:
-                        dest_set = route_destinations.get(r_id, set())
-                        for dest_stop_id in dest_set:
-                            if dest_stop_id == s["id"]:
-                                continue
-
-                            current_max_w = reachable_destinations.get(dest_stop_id, 0.0)
-                            if w_dist > current_max_w:
-                                reachable_destinations[dest_stop_id] = w_dist
-
-                raw_network_score = sum(reachable_destinations.values()) * penalty_factor
-
-<<<<<<< Updated upstream
-                total_mobility = other_mobility_score + (weight_per_component * gtfs_score)
-                hex_scores["mobility"] = round_final(min(100.0, total_mobility))
-            else:
-                hex_scores["mobility"] = round_final(other_mobility_score)
-=======
-                # Калібровано так, щоб 100 балів виходило рівно тоді, коли зупинка
-                # в радіусі r1 (вага 1.0) має 80 досяжних напрямків.
-                REFERENCE_REACHABLE_STOPS = 80
-                gtfs_score = min(
-                    100.0,
-                    (math.log1p(raw_network_score) / math.log1p(REFERENCE_REACHABLE_STOPS)) * 100.0,
-                )
-
-                hex_scores["mobility"] = int(round(gtfs_score))
-            else:
-                hex_scores["mobility"] = 0
->>>>>>> Stashed changes
 
             updates.append(hex_scores)
 

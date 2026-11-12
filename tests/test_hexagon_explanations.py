@@ -118,15 +118,26 @@ def api(monkeypatch):
 
 def test_detail_endpoint_returns_only_explanation_and_stored_rating(api, monkeypatch):
     app, db = api
+    from routers import hexagons as hexagon_router
     from app.jobs import count_category_ratings as job
 
     def unexpected_calculation(*args, **kwargs):
         raise AssertionError("Request must not recalculate category scores")
 
+    monkeypatch.setattr(hexagon_router.settings, "HERE_ROUTING_API_KEY", "test-key")
+    monkeypatch.setattr(
+        hexagon_router,
+        "get_here_routes",
+        AsyncMock(return_value={"routes": []}),
+    )
     monkeypatch.setattr(job, "calculate_distance_score", unexpected_calculation)
     monkeypatch.setattr(job, "get_distance_meters", unexpected_calculation)
-    db.execute.side_effect = [result(first=snapshot()), result(rows())]
-    status, body = asyncio.run(request(app, "/hexagons/891e7688377ffff", b"weight_daily=0"))
+    db.execute.side_effect = [
+        result(first=snapshot()),
+        result(first={"lat": 49.84, "lon": 24.03}),
+        result(rows()),
+    ]
+    status, body = asyncio.run(request(app, "/hexagons/891e7688377ffff", b"weight_daily=0&weight_mobility=0"))
     assert status == 200
     assert len(body["categories"]) == 8
     daily = next(item for item in body["categories"] if item["category"] == "daily")
@@ -135,8 +146,8 @@ def test_detail_endpoint_returns_only_explanation_and_stored_rating(api, monkeyp
     assert set(daily) == {"category", "score", "enabled", "weight", "adjusted_score", "explanation"}
     assert "за 150 м" in daily["explanation"]
     assert all(item["explanation"] for item in body["categories"])
-    assert db.execute.await_count == 2
-    sql_call = db.execute.await_args_list[1]
+    assert db.execute.await_count == 3
+    sql_call = db.execute.await_args_list[2]
     assert sql_call.args[1]["h3_id"] == snapshot()["h3_id"]
     sql = str(sql_call.args[0])
     assert "stop_route_connectable" not in sql
@@ -158,7 +169,7 @@ def test_missing_hexagon_skips_explanation_query(api):
 def test_list_endpoint_does_not_query_explanation_data(api):
     app, db = api
     db.execute.return_value = result([snapshot()])
-    status, body = asyncio.run(request(app, "/hexagons"))
+    status, body = asyncio.run(request(app, "/hexagons", b"weight_mobility=0"))
     assert status == 200
     assert set(body[0]) == {"h3_id", "overall_rating"}
     db.execute.assert_awaited_once()

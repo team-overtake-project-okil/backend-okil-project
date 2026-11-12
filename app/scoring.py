@@ -21,11 +21,11 @@ SYSTEM_WEIGHTS = {
     "health": 1.0,
     "study": 0.0,
     "daily": 0.5,
-    "mobility": 0.5,
     "sport": 0.0,
     "enjoyment": 0.0,
     "food": 0.0,
     "security": 1.0,
+    "mobility": 0.0,
 }
 
 
