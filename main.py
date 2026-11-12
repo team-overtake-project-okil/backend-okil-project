@@ -48,6 +48,7 @@ async def on_startup():
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS h3;"))
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
 
         await conn.run_sync(Base.metadata.create_all)
         # create_all не додає колонки в уже існуючу таблицю.

@@ -1,9 +1,25 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, UniqueConstraint
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import UserDefinedType
 from geoalchemy2 import Geography
+from pgvector.sqlalchemy import Vector
 
 from app.database import Base
+
+
+AI_EMBEDDING_DIMENSIONS = 1536
 
 
 class H3IndexType(UserDefinedType):
@@ -162,3 +178,23 @@ class RouteSegmentLink(Base):
 
     segment = relationship("RouteSegment", back_populates="route_links")
     route = relationship("Route")
+
+
+class AIKnowledge(Base):
+    __tablename__ = "ai_knowledge"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    category = Column(String(50), nullable=False, index=True)
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(AI_EMBEDDING_DIMENSIONS), nullable=False)
+    metadata_json = Column("metadata", JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        Index(
+            "ix_ai_knowledge_embedding_hnsw",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+    )
