@@ -58,6 +58,77 @@ fetch("http://localhost:8000/openapi.json")
 
 This checks connectivity only; application GET endpoints are implemented separately.
 
+## AI knowledge vectors
+
+The `ai_knowledge` table stores text fragments and their 1536-dimensional
+embeddings in PostgreSQL with pgvector. It is intended for searchable reference
+content about the project. Its `category` column is an optional topic label; it
+does not classify user questions. `metadata` is JSONB for optional source and
+future fields. Embeddings stored in this table must have 1536 dimensions.
+
+The API enables the PostgreSQL `vector` extension at startup, so the database
+server must have pgvector installed.
+
+## AI intent classifier
+
+`app.intent_classifier` classifies questions as `poi`, `hex_score`, or
+`project_info` using the multilingual
+`paraphrase-multilingual-MiniLM-L12-v2` Sentence Transformers model. Create
+the default classifier once during application startup, then reuse it:
+
+```python
+from app.intent_classifier import create_default_intent_classifier
+
+classifier = await create_default_intent_classifier()
+match = await classifier.classify("Що означає оцінка цього гекса?")
+print(match.intent, match.similarity)
+```
+
+The model produces 384-dimensional embeddings for intent classification.
+These are separate from the 1536-dimensional `ai_knowledge` table embeddings;
+do not insert classifier embeddings into that table.
+
+To try the classifier interactively from the repository root, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m app.try_intent_classifier
+```
+
+For full AI answers, add a Groq API key to your local `.env` file:
+
+```dotenv
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=openai/gpt-oss-20b
+```
+
+The configured default is `openai/gpt-oss-20b`. Set `GROQ_MODEL` to another
+model ID currently available in your Groq account if desired. Groq's active
+models are listed in the [Groq model catalog](https://console.groq.com/docs/models).
+The tester reports Groq API errors, including rate limits, rather than
+returning an incomplete answer. The API key is sent only to Groq and must not
+be committed.
+
+The first launch loads the local intent model. Enter questions to see
+recognized project-related parts and parts that are ignored. For example,
+`поясни оцінку цього гекса і дай рецепт сирників` separates the hex-score
+question from the unrelated recipe request. For POI and hex-score questions,
+the tester asks for the hex's 15-character H3 ID unless it is included in the
+question. POI records for that exact H3 cell, with readable type and category
+names, are sent to Groq so the model can describe them naturally. Its
+prompt asks it not to invent places or add boilerplate about absent types. If
+the cell has no POI records, the tester reports that directly without calling
+the model. Hex-score questions fetch facts from PostgreSQL and send them to
+Groq. Project-info questions use the category and POI-type catalog from
+PostgreSQL. Unrelated parts are not sent to Groq.
+
+Only the selected question and the relevant facts returned from PostgreSQL
+are sent to Groq. This CLI is for local experimentation; it does not add
+an API endpoint to the backend.
+
+Parts scoring below `0.2` are reported as unrelated; pass another
+`min_similarity` to `create_default_intent_classifier` to tune the threshold.
+Similarity scores are not probabilities. On Windows, press Ctrl+Z and Enter
+(or Ctrl+C) to exit.
 ## AI chat WebSocket (#60)
 
 The chat uses Redis 6.0.9 or newer for anonymous sessions. To start a local Redis
@@ -101,10 +172,20 @@ The backend sends events for the same `requestId`:
 ```json
 {"type":"message.accepted","requestId":"req_1"}
 {"type":"answer.status","requestId":"req_1","stage":"generating"}
-{"type":"answer.completed","requestId":"req_1","text":"Test reply: Hello"}
+{"type":"answer.completed","requestId":"req_1","text":"<AI answer>"}
 ```
 
-The backend currently uses a test reply service. It saves the completed turn
+The chat adapter uses the AI classifier and `answer_intent` service from
+[PR #69](https://github.com/team-overtake-project-okil/backend-okil-project/pull/69).
+This branch includes the two unchanged AI modules from that PR; their Python
+dependencies, intent model and `GROQ_API_KEY` must be configured. Until then the socket returns a
+readable `ai_unavailable` error; it never substitutes a test reply.
+See [chat AI integration](docs/chat_ai_integration.md) for setup, context,
+errors, source provenance and verification. Optional `CHAT_PRELOAD_AI=true`
+loads the classifier during startup so a cold load does not consume the first
+reply's deadline.
+
+It saves the completed turn
 before sending `answer.completed`. One reply can run per session at a time,
 including when two sockets share a token. The reply times out after 30 seconds
 and is cancelled when the socket disconnects. Only completed turns appear in

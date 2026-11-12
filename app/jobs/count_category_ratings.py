@@ -52,8 +52,32 @@ def calculate_distance_score(d: float, r1: float, r2: float, r3: float) -> float
         return max(0.0, score)
 
 
+def calculate_top_n_score(h_lat, h_lon, type_points, r1, r2, r3, n=TOP_N_POINTS) -> float:
+    """
+    Бал по типу POI = середнє з балів N найближчих точок цього типу,
+    а не тільки однієї найближчої. Це не дає одній точці вибивати 100
+    за весь тип (а отже і за категорію при малій кількості типів).
+    """
+    if not type_points:
+        return 0.0
+
+    distances = sorted(
+        get_distance_meters(h_lat, h_lon, p["lat"], p["lon"])
+        for p in type_points
+    )
+    nearest = distances[:n]
+    scores = [calculate_distance_score(d, r1, r2, r3) for d in nearest]
+    return sum(scores) / len(scores)
+
+
+def get_radius(pt_config, attr: str, default: float) -> float:
+    """Безпечне діставання радіуса: 0 в БД лишається 0, а не підміняється дефолтом."""
+    val = getattr(pt_config, attr, None)
+    return val if val is not None else default
+
+
 async def main(dry_run: bool = False):
-    print("🚀 Запуск розрахунку балів з динамічним розподілом ваг (1 / N)...")
+    print("🚀 Запуск розрахунку балів (top-N POI, mobility = тільки GTFS)...")
 
     async with async_session_maker() as session:
         # 1. Завантаження типів POI та згрупування за категоріями
@@ -126,7 +150,7 @@ async def main(dry_run: bool = False):
             h_lat, h_lon = h["lat"], h["lon"]
             hex_scores = {"h3_id": h["h3_id"]}
 
-            # Стандартні категорії (health, study, daily, sport, enjoyment, security)
+            # Стандартні категорії (health, study, daily, sport, enjoyment, security тощо)
             for category, types_list in categories_map.items():
                 if category == "mobility":
                     continue
@@ -146,17 +170,11 @@ async def main(dry_run: bool = False):
                     if not pt_config or not type_points:
                         continue
 
-                    min_dist = float("inf")
-                    for p in type_points:
-                        dist = get_distance_meters(h_lat, h_lon, p["lat"], p["lon"])
-                        if dist < min_dist:
-                            min_dist = dist
-
-                    score = calculate_distance_score(
-                        min_dist,
-                        pt_config.radius_of_influence_1 or 300,
-                        pt_config.radius_of_influence_2 or 600,
-                        pt_config.radius_of_influence_3 or 1200,
+                    score = calculate_top_n_score(
+                        h_lat, h_lon, type_points,
+                        get_radius(pt_config, "radius_of_influence_1", 300),
+                        get_radius(pt_config, "radius_of_influence_2", 600),
+                        get_radius(pt_config, "radius_of_influence_3", 1200),
                     )
                     cat_score += weight * score
 

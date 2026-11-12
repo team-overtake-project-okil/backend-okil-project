@@ -42,10 +42,13 @@ app.include_router(chat_router)
 
 @app.on_event("startup")
 async def on_startup():
+    if not settings.DB_INIT_ON_STARTUP:
+        return
     print("Створення таблиць у базі даних (асинхронно)...")
     async with engine.begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS h3;"))
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
 
         await conn.run_sync(Base.metadata.create_all)
         # create_all не додає колонки в уже існуючу таблицю.
@@ -53,6 +56,13 @@ async def on_startup():
             "ALTER TABLE stops ADD COLUMN IF NOT EXISTS name VARCHAR(255);"
         ))
     print("Готово!")
+
+
+@app.on_event("startup")
+async def warm_chat_ai():
+    if settings.CHAT_PRELOAD_AI:
+        from app.chat_service import preload_ai
+        await preload_ai()
 
 
 @app.on_event("shutdown")
