@@ -2,6 +2,8 @@ requests
 pytest
 fastapi
 uvicorn
+websockets
+redis>=5
 sqlalchemy[asyncio]
 psycopg[binary]
 python-dotenv

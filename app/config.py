@@ -1,8 +1,11 @@
+from pydantic import PositiveInt
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     DB_URL: str 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    CHAT_SESSION_TTL_SECONDS: PositiveInt = 1800
     SERPAPI_KEYS: str = ""
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
