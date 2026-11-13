@@ -6,6 +6,15 @@ After downloading and opening in code redactor
 
 -copy file .env.example and name it .env in that file put url from telegram instead of PUTDATABASEURL
 
+## Backend data jobs
+
+From the repository root, preview the automatic job order with
+`python -m app.jobs --dry-run`, then run it with `python -m app.jobs`.
+The run requires a prepared PostgreSQL database, the point-type catalog,
+`SERPAPI_KEYS`, a GTFS archive and both shelter source workbooks.
+See [backend job setup and scope](docs/backend_jobs.md) for prerequisites,
+custom input paths, excluded manual imports and failure behavior.
+
 For mobility scoring and routes, add your provider credentials to `.env`:
 
 ```dotenv

@@ -7,7 +7,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.config import settings
 from app.database import async_session_maker
-from app.models import Point, PointType
+from app.jobs.validation import require_point_types
+from app.models import Point
 from app.models import HexTable
 SOURCE_NAME = "google_maps"
 CHUNK = 3000
@@ -24,7 +25,7 @@ POI_TYPES = [
     {"query": "спортивний майданчик", "type": "sport_ground", "category": "sport"},
     {"query": "стадіон", "type": "stadium", "category": "sport"},
     {"query": "кафе", "type": "cafe", "category": "food"},
-    {"query": "пекарня", "type": "cafe", "bakery": "food"},
+    {"query": "пекарня", "type": "bakery", "category": "food"},
     {"query": "кав'ярня", "type": "coffee_shop", "category": "food"},
     {"query": "фаст фуд", "type": "fast_food", "category": "food"},
     {"query": "ресторан", "type": "restaurant", "category": "food"},
@@ -90,8 +91,7 @@ def fetch_poi_type(
         start = 0
         while True:
             if current_key_idx >= len(serp_keys):
-                print("❌ Усі API ключі вичерпано!")
-                return pois_map, current_key_idx
+                raise RuntimeError("Усі SerpAPI ключі вичерпано; збір POI не завершено")
 
             active_api_key = serp_keys[current_key_idx]
 
@@ -107,18 +107,26 @@ def fetch_poi_type(
                 "api_key": active_api_key,
             }
 
-            response = requests.get(
-                "https://serpapi.com/search", params=params
-            ).json()
+            try:
+                http_response = requests.get(
+                    "https://serpapi.com/search", params=params, timeout=60
+                )
+                response = http_response.json()
+            except requests.RequestException:
+                # Request exceptions can contain the API key in the URL.
+                raise RuntimeError("SerpAPI request failed; credentials omitted") from None
 
             if "error" in response:
                 if "hasn't returned any results" in str(response["error"]):
                     break
                 print(
-                    f"⚠️ Помилка ключа {active_api_key[:8]}... Перемикаємось на наступний."
+                    "⚠️ Помилка SerpAPI ключа. Перемикаємось на наступний."
                 )
                 current_key_idx += 1
                 continue
+
+            if not http_response.ok:
+                raise RuntimeError(f"SerpAPI returned HTTP {http_response.status_code}")
 
             results = response.get("local_results", [])
             if not results:
@@ -194,10 +202,6 @@ def fetch_all_pois() -> list[dict]:
     all_pois_map: dict[str, dict] = {}
 
     for poi in POI_TYPES:
-        if current_key_idx >= len(serp_keys):
-            print(f"⏭ Пропускаю '{poi['type']}' — ключі вичерпано.")
-            continue
-
         print(f"→ Збираю '{poi['type']}' (\"{poi['query']}\")...")
         found, current_key_idx = fetch_poi_type(
             poi["query"], poi["type"], centers, serp_keys, current_key_idx
@@ -209,12 +213,15 @@ def fetch_all_pois() -> list[dict]:
 
 
 async def main(dry_run: bool = False):
+    if not dry_run:
+        async with async_session_maker() as session:
+            await require_point_types(session, {poi["type"]: poi["category"] for poi in POI_TYPES})
+
     pois = fetch_all_pois()
     print(f"План: зібрано {len(pois)} унікальних точок усіх типів.")
 
     if not pois:
-        print("Нічого зберігати.")
-        return
+        raise ValueError("SerpAPI не повернув придатних POI; імпорт скасовано")
 
     if dry_run:
         print("--dry-run: БД не чіпали.")
@@ -223,14 +230,6 @@ async def main(dry_run: bool = False):
     # 2. Запис у БД в одній асинхронній транзакції
     async with async_session_maker() as session:
         async with session.begin():
-            # Гарантуємо наявність усіх типів точок, що зустрілись у POI_TYPES
-            for poi in POI_TYPES:
-                pt_stmt = (
-                    pg_insert(PointType)
-                    .values(type=poi["type"], category=poi["category"])
-                    .on_conflict_do_nothing(index_elements=["type"])
-                )
-                await session.execute(pt_stmt)
             missing_hexes = []
             seen_h3_ids = set()
             for p in pois:
