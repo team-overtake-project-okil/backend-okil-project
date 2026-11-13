@@ -10,7 +10,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session_maker
-from app.models import HexTable, PointType, Route, Stop, StopRouteConnectable
+from app.jobs.validation import require_point_types
+from app.models import HexTable, Route, Stop, StopRouteConnectable
 
 H3_RESOLUTION = 9
 SOURCE_NAME = "easyway"
@@ -52,7 +53,6 @@ async def ensure_hexagons_exist(session, h3_ids: set[str]):
             "health": 0,
             "study": 0,
             "daily": 0,
-            "mobility": 0,
             "sport": 0,
             "enjoyment": 0,
             "food": 0, 
@@ -150,22 +150,14 @@ def parse_archive(zip_path: str) -> dict:
 
 
 async def main(zip_path: str, dry_run: bool = False):
-    try:
-        data = parse_archive(zip_path)
-    except FileNotFoundError:
-        print(f"Error: File not found at {zip_path}")
-        return
-    except (zipfile.BadZipFile, KeyError) as e:
-        print(f"Error: некоректний GTFS-архів ({e!r})")
-        return
+    data = parse_archive(zip_path)
 
     links_total = sum(len(r["stop_external_ids"]) for r in data["routes"])
     print(f"План: stops={len(data['stops'])} routes={len(data['routes'])} "
           f"links={links_total} відхилено_зупинок={data['rejected_stops']}")
 
     if not data["stops"] or not data["routes"] or links_total == 0:
-        print("Error: у архіві немає придатних зупинок/маршрутів.")
-        return
+        raise ValueError("У GTFS-архіві немає придатних зупинок/маршрутів")
 
     if dry_run:
         print("--dry-run: БД не чіпав.")
@@ -173,6 +165,7 @@ async def main(zip_path: str, dry_run: bool = False):
 
     async with async_session_maker() as session:
         async with session.begin():
+            await require_point_types(session, {POINT_TYPE_NAME: POINT_TYPE_CATEGORY})
             # 1. Автоматично гарантуємо наявність ВСІХ гексагонів зупинок у hex_table
             all_h3_ids = {s["h3_id"] for s in data["stops"] if s["h3_id"]}
             await ensure_hexagons_exist(session, all_h3_ids)
@@ -188,20 +181,11 @@ async def main(zip_path: str, dry_run: bool = False):
             await session.execute(delete(Route).where(Route.source == SOURCE_NAME))
             await session.execute(delete(Stop).where(Stop.source == SOURCE_NAME))
 
-            # 3. Створення типу точки, якщо відсутній
-            pt_stmt = (
-                pg_insert(PointType)
-                .values(type=POINT_TYPE_NAME, category=POINT_TYPE_CATEGORY)
-                .on_conflict_do_nothing(index_elements=["type"])
-            )
-            await session.execute(pt_stmt)
-
             # 4. Вставка зупинок
             stops_to_insert = [
                 {
                     "source": SOURCE_NAME,
                     "external_id": s["external_id"],
-                    "name": s["name"][:255],
                     "type": POINT_TYPE_NAME,
                     "geom": s["geom"],
                     "h3_id": s["h3_id"],
