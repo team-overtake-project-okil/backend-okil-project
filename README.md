@@ -8,6 +8,13 @@ After downloading and opening in code redactor
 
 For mobility scoring and routes, add your provider credentials to `.env`:
 
+For local development without TravelTime/HERE keys, set
+`EXTERNAL_TRANSPORT_ENABLED=false` in `.env` and restart the backend. Hexagon
+endpoints then skip both providers, exclude mobility from the overall rating
+and mark that category disabled, and return an empty `routes` list. Other
+categories continue to use database scores. The default is `true`; restore it
+after adding the credentials. This setting does not disable the AI provider.
+
 ```dotenv
 TRAVELTIME_APP_ID=your-traveltime-application-id
 TRAVELTIME_API_KEY=your-traveltime-api-key
@@ -130,6 +137,36 @@ Parts scoring below `0.2` are reported as unrelated; pass another
 Similarity scores are not probabilities. On Windows, press Ctrl+Z and Enter
 (or Ctrl+C) to exit.
 ## AI chat WebSocket (#60)
+
+### Clearing a conversation (#83)
+
+After `session.ready`, a client can clear its current session on the same socket:
+
+```json
+{"type":"session.clear","requestId":"clear_1","sessionToken":"<current-token>"}
+```
+
+Both a valid `requestId` and a valid token matching the socket's opened session
+are required. The reply is
+`{"type":"session.cleared","requestId":"clear_1","deleted":true}`.
+`deleted:false` also confirms success: the key had already expired or was
+deleted by another connection. Malformed requests, a token different from the
+opened session and storage failures use the existing `error` envelope with the
+clear request's `requestId`. A request without a valid ID has `requestId:null`.
+
+Only the hashed Redis key for this token is deleted, atomically, including its
+history and pending reply claim. The database is never flushed. The socket's
+own reply task is cancelled before acknowledgement. Other sockets cannot save
+an answer into the deleted key: their next operation returns `session_expired`.
+No immediate notification is broadcast to idle sockets. Concurrent Redis updates
+use WATCH and SET XX and cannot resurrect a deleted session.
+
+On acknowledgement the frontend removes its messages and old session token,
+then sends `session.open` without a token to start a new conversation. A storage
+error leaves the socket's binding intact so clearing can be retried. Clients must
+reconcile with the backend after a disconnect where the acknowledgement was lost.
+
+### Connecting and sending messages
 
 The chat uses Redis 6.0.9 or newer for anonymous sessions. To start a local Redis
 server with Docker, run this in a separate terminal:

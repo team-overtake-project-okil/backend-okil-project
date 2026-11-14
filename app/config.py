@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     SERPAPI_KEYS: str = ""
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
+    EXTERNAL_TRANSPORT_ENABLED: bool = True
     TRAVELTIME_API_KEY: str = ""
     TRAVELTIME_APP_ID: str = ""
     TRAVELTIME_TIME_CONSTANT_SECONDS: int = 1500

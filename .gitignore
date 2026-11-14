@@ -226,3 +226,5 @@ __pycache__/
 .idea/
 serp_cache.json
 review_*.csv
+# Local optional test dependencies.
+.test-deps/

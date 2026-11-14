@@ -8,6 +8,8 @@ from typing import TypedDict, TypeVar
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
+from app.chat_protocol import SESSION_TOKEN_PATTERN
+
 MAX_HISTORY_TURNS = 30
 T = TypeVar("T")
 
@@ -63,6 +65,13 @@ class ChatSessionStore:
         if raw is None:
             raise ChatSessionError("session_expired", "This chat session has expired.")
         return json.loads(raw)["history"]
+
+    async def clear(self, token: str) -> bool:
+        if not isinstance(token, str) or not SESSION_TOKEN_PATTERN.fullmatch(token):
+            raise ChatSessionError("invalid_message", "Invalid sessionToken.")
+        # DEL is atomic and idempotent. Concurrent WATCH/SET XX updates cannot
+        # recreate this key, including replies running on another server.
+        return bool(await self.redis.delete(self._key(token)))
 
     async def _update(
         self, token: str, change: Callable[[ChatSession], T], *, refresh_ttl: bool = True
