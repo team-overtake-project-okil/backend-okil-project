@@ -10,10 +10,14 @@ PR #69 (`feat/add-ai_model-validation`) supplies `app.ai_assistant`,
 `app.intent_classifier`, model dependencies and database context builders.
 At implementation time, its reviewed head was
 `0202119c576f059328b161dbc085f387d0ca728b` and it was not merged into main.
-For the assembled local project, this branch includes unchanged copies of
+For the assembled local project, the integration initially included copies of
 `app/ai_assistant.py` and `app/intent_classifier.py` from that exact revision.
-It deliberately does not import the upstream scoring changes, vector table or
-DDL. `sentence-transformers` is included in requirements. Lazy initialization
+The current classifier descriptions and their scenario encoding are documented in
+[intent_classification.md](intent_classification.md). The current main also has
+the `ai_knowledge` vector model; curated text export is documented in
+[ai_knowledge_ingestion.md](ai_knowledge_ingestion.md). That export does not yet
+add retrieval to `get_project_information`.
+`sentence-transformers` is included in requirements. Lazy initialization
 still returns `ai_unavailable` when a deployment lacks the model or key.
 
 With the dependencies available, install the combined requirements, configure

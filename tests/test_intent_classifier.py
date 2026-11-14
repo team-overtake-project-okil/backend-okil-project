@@ -91,7 +91,7 @@ def test_rejects_query_embedding_with_wrong_dimensions():
         asyncio.run(classifier.classify("питання користувача"))
 
 
-def test_create_embeds_intent_descriptions_once():
+def test_create_embeds_each_scenario_once_and_reuses_centroids():
     calls = []
 
     async def embed_text(text):
@@ -101,7 +101,7 @@ def test_create_embeds_intent_descriptions_once():
         intent = next(
             intent
             for intent, description in INTENT_DESCRIPTIONS.items()
-            if description == text
+            if text in description.split("\n\n")
         )
         vector = [0.0] * EMBEDDING_DIMENSIONS
         vector[list(Intent).index(intent)] = 1.0
@@ -111,8 +111,52 @@ def test_create_embeds_intent_descriptions_once():
     result = asyncio.run(classifier.classify("нове запитання"))
 
     assert result.intent is Intent.POI
-    assert calls.count(INTENT_DESCRIPTIONS[Intent.POI]) == 1
-    assert len(calls) == len(Intent) + 1
+    scenarios = [
+        scenario
+        for description in INTENT_DESCRIPTIONS.values()
+        for scenario in description.split("\n\n")
+    ]
+    assert all(calls.count(scenario) == 1 for scenario in scenarios)
+    assert len(calls) == len(scenarios) + 1
+
+
+def test_create_preserves_later_scenarios_and_normalizes_each(monkeypatch):
+    # A short-input encoder sees each scenario independently. A later case
+    # must influence the centroid even when the first case has a larger norm.
+    monkeypatch.setattr("app.intent_classifier.INTENT_DESCRIPTIONS", {
+        Intent.POI: "first scenario\n\nlast scenario",
+        Intent.HEX_SCORE: "score scenario",
+        Intent.PROJECT_INFO: "project scenario",
+    })
+    vectors = {
+        "first scenario": [100.0, 0.0, 0.0],
+        "last scenario": [0.0, 1.0, 0.0],
+        "score scenario": [-1.0, 0.0, 0.0],
+        "project scenario": [0.0, 0.0, 1.0],
+        "query about last scenario": [0.0, 1.0, 0.0],
+    }
+
+    async def embed_text(text):
+        return vectors[text]
+
+    classifier = asyncio.run(IntentClassifier.create(embed_text))
+    match = asyncio.run(classifier.classify("query about last scenario"))
+    assert match.intent is Intent.POI
+    assert match.similarity == pytest.approx(2 ** -0.5)
+
+
+def test_create_rejects_inconsistent_scenario_dimensions(monkeypatch):
+    monkeypatch.setattr("app.intent_classifier.INTENT_DESCRIPTIONS", {
+        Intent.POI: "short\n\nlong",
+        Intent.HEX_SCORE: "score",
+        Intent.PROJECT_INFO: "project",
+    })
+
+    async def embed_text(text):
+        return [1.0, 0.0] if text == "short" else [1.0, 0.0, 0.0]
+
+    with pytest.raises(ValueError, match="matching embedding dimensions"):
+        asyncio.run(IntentClassifier.create(embed_text))
 
 
 def test_parse_query_separates_supported_and_unrelated_parts():
