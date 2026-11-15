@@ -1,6 +1,11 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
+    DEBUG_ENABLED: bool = False
+    DEBUG_USER: str = ''
+    DEBUG_PASSWORD: str = ''
+    DEBUG_REQUIRE_HTTPS: bool = True
+    DEBUG_ALLOW_LOCAL_HTTP: bool = False
     DB_URL: str 
     CORS_ORIGINS: list[str] = ["http://localhost:5173"]
     SERPAPI_KEYS: str = ""
