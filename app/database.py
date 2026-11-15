@@ -1,6 +1,14 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base
 from app.config import settings
+from app.request_timing import timed_stage
+
+
+class TimedAsyncSession(AsyncSession):
+    async def execute(self, *args, **kwargs):
+        # Includes pool checkout/connection setup on the first execute.
+        with timed_stage("db.execute"):
+            return await super().execute(*args, **kwargs)
 
 engine = create_async_engine(
     url=settings.DATABASE_URL_asyncpg,
@@ -12,7 +20,7 @@ engine = create_async_engine(
 
 async_session_maker = async_sessionmaker(
     bind=engine, 
-    class_=AsyncSession,
+    class_=TimedAsyncSession,
     expire_on_commit=False
 )
 

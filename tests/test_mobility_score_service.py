@@ -11,6 +11,8 @@ from routers.hexagons import _here_error_detail
 
 
 class FakeResponse:
+    status_code = 200
+
     def __init__(self, payload):
         self.payload = payload
 
