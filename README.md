@@ -60,11 +60,40 @@ This checks connectivity only; application GET endpoints are implemented separat
 
 ## AI knowledge vectors
 
-The `ai_knowledge` table stores text fragments and their 1536-dimensional
+[Окіл: база знань про механіку](docs/ai_context.md) contains standalone Ukrainian
+retrieval sections with stable IDs, sample questions, factual answers and source
+metadata. Export them to UTF-8 JSONL without calling a model or writing to the DB:
+
+```powershell
+python -m app.export_ai_knowledge --output okil_knowledge.jsonl
+```
+
+See [ingestion instructions](docs/ai_knowledge_ingestion.md) for the record format,
+embedding dimensions and the remaining retrieval integration.
+
+The `ai_knowledge` table stores text fragments and their 384-dimensional
 embeddings in PostgreSQL with pgvector. It is intended for searchable reference
 content about the project. Its `category` column is an optional topic label; it
 does not classify user questions. `metadata` is JSONB for optional source and
-future fields. Embeddings stored in this table must have 1536 dimensions.
+future fields. Embeddings stored in this table must have 384 dimensions, generated
+with `paraphrase-multilingual-MiniLM-L12-v2` for both documents and search queries.
+
+For existing databases, verify that the embedding column is `vector(384)`
+through a write-enabled database connection before importing vectors.
+`create_all` does not alter an existing column. Regenerate incompatible existing
+vectors from their source texts rather than truncating or padding them.
+
+Import Markdown directly with local MiniLM embeddings using the configured
+`DB_URL` from `.env`:
+
+```powershell
+python -m app.import_ai_knowledge --validate-only
+python -m app.import_ai_knowledge --apply
+```
+
+Without `--apply`, the importer only creates embeddings and does not connect to
+the DB. Repeated imports update existing document/chunk IDs without duplicates;
+unrelated records and removed topics are not deleted automatically.
 
 The API enables the PostgreSQL `vector` extension at startup, so the database
 server must have pgvector installed.
@@ -85,8 +114,15 @@ print(match.intent, match.similarity)
 ```
 
 The model produces 384-dimensional embeddings for intent classification.
-These are separate from the 1536-dimensional `ai_knowledge` table embeddings;
-do not insert classifier embeddings into that table.
+The `ai_knowledge` table uses the same 384-dimensional model for document and
+search-query embeddings. Intent centroids describe request topics, not knowledge
+fragments; generate a separate embedding for each document fragment.
+
+`INTENT_DESCRIPTIONS` contains short, positive scenarios for each intent. At
+initialization each scenario is encoded separately, normalized, and averaged into
+one intent vector so later scenarios are not lost by encoding a long description
+as a single input. Existing cosine scoring and the `0.2` threshold are preserved.
+See [intent boundaries and evaluation cases](docs/intent_classification.md).
 
 To try the classifier interactively from the repository root, run:
 
@@ -177,7 +213,7 @@ The backend sends events for the same `requestId`:
 
 The chat adapter uses the AI classifier and `answer_intent` service from
 [PR #69](https://github.com/team-overtake-project-okil/backend-okil-project/pull/69).
-This branch includes the two unchanged AI modules from that PR; their Python
+The AI modules originate from that PR; their Python
 dependencies, intent model and `GROQ_API_KEY` must be configured. Until then the socket returns a
 readable `ai_unavailable` error; it never substitutes a test reply.
 See [chat AI integration](docs/chat_ai_integration.md) for setup, context,
