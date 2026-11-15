@@ -2,7 +2,7 @@ import math
 from collections import defaultdict
 
 from geoalchemy2 import Geometry
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, Float, cast, select, func
 
 from app.models import HexTable, Point, PointType, Stop, StopRouteConnectable
 from app.scoring import SYSTEM_WEIGHTS
@@ -43,8 +43,10 @@ async def load_inputs(session):
 
 async def load_hexes(session, ids=None):
     geom = HexTable.geom.cast(Geometry)
-    query = select(cast(HexTable.h3_id, String).label("h3_id"), geom.ST_Y().label("lat"), geom.ST_X().label("lon"),
-                   *(getattr(HexTable, name) for name in SYSTEM_WEIGHTS))
+    # Main now computes mobility externally. Older databases may still carry its stored score.
+    legacy_mobility = func.coalesce(cast(func.to_jsonb(HexTable.__table__.table_valued()).op("->>")("mobility"), Float), 0).label("mobility")
+    columns = [getattr(HexTable, name) if name != "mobility" else legacy_mobility for name in SYSTEM_WEIGHTS]
+    query = select(cast(HexTable.h3_id, String).label("h3_id"), geom.ST_Y().label("lat"), geom.ST_X().label("lon"), *columns)
     if ids is not None:
         query = query.where(cast(HexTable.h3_id, String).in_(ids))
     return (await session.execute(query)).mappings().all()
