@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
 from app.database import get_async_db
-from app.here_routes_service import get_here_routes
+from app.here_routes_service import HereRouteFormatError, get_here_routes
 from app.hexagon_repository import fetch_hexagon, fetch_hexagons
 from app.mobility_score_service import get_mobility_scores
 from app.mobility_transport import LVIV_CENTER
@@ -135,6 +135,8 @@ async def get_hexagon(
         route_result = await get_here_routes(
             h3_id, (float(row["lat"]), float(row["lon"])), transportation, LVIV_CENTER
         )
+    except HereRouteFormatError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:

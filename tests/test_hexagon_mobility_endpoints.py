@@ -58,7 +58,20 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     monkeypatch.setattr(
         hexagons,
         "get_here_routes",
-        AsyncMock(return_value={"h3_id": "hex-a", "routes": [{"transport_mode": "bus"}]}),
+        AsyncMock(return_value={
+            "h3_id": "hex-a",
+            "routes": {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "properties": {"transport_mode": "bus"},
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[24.0, 49.8], [24.1, 49.9]],
+                    },
+                }],
+            },
+        }),
     )
     params = {f"weight_{category}": 0 for category in SYSTEM_WEIGHTS if category != "mobility"}
     params["weight_mobility"] = 1
@@ -68,7 +81,8 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     assert response.status_code == 200
     body = response.json()
     assert body["overall_rating"] == 72
-    assert body["routes"] == [{"transport_mode": "bus"}]
+    assert body["routes"]["type"] == "FeatureCollection"
+    assert body["routes"]["features"][0]["properties"]["transport_mode"] == "bus"
     assert next(item for item in body["categories"] if item["category"] == "mobility")["score"] == 72
     assert {"h3_id", "overall_rating", "categories", "routes"} == set(body)
     hexagons.get_here_routes.assert_awaited_once_with(

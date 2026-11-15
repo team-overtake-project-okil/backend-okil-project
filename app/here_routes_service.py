@@ -1,12 +1,69 @@
+import re
 from typing import Any
 
 import httpx
 
 from app.config import settings
-from app.mobility_transport import LVIV_CENTER, mobility_modes
+from app.mobility_transport import (
+    LVIV_CENTER,
+    LVIV_VALID_TRANSIT_ROUTE_NUMBERS,
+    mobility_modes,
+)
+from app.route_geojson import build_here_routes_geojson
 
 HERE_ROUTING_URL = "https://router.hereapi.com/v8/routes"
 HERE_TRANSIT_URL = "https://transit.router.hereapi.com/v8/routes"
+TRANSIT_ALTERNATIVE_COUNTS = (10, 20, 30)
+_TRANSIT_ROUTE_NUMBER = re.compile(r"(?<![A-Z0-9])(\d{1,3}[A-Z]?)(?![A-Z0-9])", re.IGNORECASE)
+
+
+class HereRouteFormatError(RuntimeError):
+    """Raised when HERE returns an invalid encoded route geometry."""
+
+
+def _transit_route_number(section: dict[str, Any]) -> str | None:
+    transport = section.get("transport")
+    if not isinstance(transport, dict):
+        return None
+
+    for key in ("shortName", "routeNumber", "name"):
+        value = transport.get(key)
+        if value is None:
+            continue
+        match = _TRANSIT_ROUTE_NUMBER.search(str(value))
+        if match:
+            return match.group(1).upper()
+    return None
+
+
+def _has_only_valid_transit_routes(route: dict[str, Any]) -> bool:
+    transit_sections = [
+        section for section in route.get("sections", [])
+        if section.get("type") == "transit"
+    ]
+    for section in transit_sections:
+        route_number = _transit_route_number(section)
+        if route_number is None:
+            return False
+
+        transport = section.get("transport")
+        transport_description = ""
+        if isinstance(transport, dict):
+            transport_description = " ".join(
+                str(transport.get(key, ""))
+                for key in ("mode", "category", "name")
+            ).lower()
+        if "trolley" in transport_description:
+            route_type = "trolleybus"
+        elif "tram" in transport_description:
+            route_type = "tram"
+        elif "minibus" in transport_description or "marshrutka" in transport_description:
+            route_type = "minibus"
+        else:
+            route_type = "bus"
+        if route_number not in LVIV_VALID_TRANSIT_ROUTE_NUMBERS[route_type]:
+            return False
+    return bool(transit_sections)
 
 
 async def get_here_routes(
@@ -22,7 +79,7 @@ async def get_here_routes(
     async with httpx.AsyncClient(timeout=20.0) as client:
         for mode in mobility_modes(transportation):
             is_transit = mode == "bus"
-            params = {
+            base_params = {
                 "apiKey": settings.HERE_ROUTING_API_KEY,
                 "origin": f"{origin[0]},{origin[1]}",
                 "destination": f"{destination[0]},{destination[1]}",
@@ -33,20 +90,47 @@ async def get_here_routes(
                 ),
                 **({"modes": "bus"} if is_transit else {"transportMode": "car"}),
             }
-            response = await client.get(
-                HERE_TRANSIT_URL if is_transit else HERE_ROUTING_URL,
-                params=params,
-            )
-            response.raise_for_status()
-            mode_routes = response.json().get("routes", [])
             if is_transit:
-                mode_routes = [
-                    route
-                    for route in mode_routes
-                    if any(
-                        section.get("type") == "transit"
-                        for section in route.get("sections", [])
+                fallback_route = None
+                for alternative_count in TRANSIT_ALTERNATIVE_COUNTS:
+                    response = await client.get(
+                        HERE_TRANSIT_URL,
+                        params={**base_params, "alternatives": alternative_count},
                     )
-                ]
-            routes.extend({"transport_mode": mode, **route} for route in mode_routes)
-    return {"h3_id": h3_id, "routes": routes}
+                    response.raise_for_status()
+                    transit_routes = [
+                        route
+                        for route in response.json().get("routes", [])
+                        if any(
+                            section.get("type") == "transit"
+                            for section in route.get("sections", [])
+                        )
+                    ]
+                    if fallback_route is None and transit_routes:
+                        fallback_route = transit_routes[0]
+
+                    preferred_route = next(
+                        (
+                            route for route in transit_routes
+                            if _has_only_valid_transit_routes(route)
+                        ),
+                        None,
+                    )
+                    if preferred_route is not None:
+                        routes.append({"transport_mode": mode, **preferred_route})
+                        break
+                else:
+                    if fallback_route is not None:
+                        routes.append({"transport_mode": mode, **fallback_route})
+            else:
+                response = await client.get(HERE_ROUTING_URL, params=base_params)
+                response.raise_for_status()
+                routes.extend(
+                    {"transport_mode": mode, **route}
+                    for route in response.json().get("routes", [])
+                )
+    try:
+        geojson = build_here_routes_geojson(routes)
+    except ValueError as exc:
+        raise HereRouteFormatError("HERE API returned an invalid route polyline") from exc
+    return {"h3_id": h3_id, "routes": geojson}

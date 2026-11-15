@@ -1,4 +1,79 @@
-from app.route_geojson import build_hex_stops_geojson
+from app.route_geojson import build_here_routes_geojson, build_hex_stops_geojson
+
+
+def test_here_routes_keep_each_section_with_transit_label_and_style():
+    collection = build_here_routes_geojson([{
+        "transport_mode": "bus",
+        "sections": [
+            {
+                "type": "pedestrian",
+                "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+            },
+            {
+                "type": "transit",
+                "transport": {
+                    "mode": "bus",
+                    "name": "8",
+                    "headsign": "Центр",
+                    "color": "#e63946",
+                },
+                "polyline": "BFs94xJg5g1BsBgD",
+            },
+        ],
+    }])
+
+    walk, bus = collection["features"]
+    assert collection["type"] == "FeatureCollection"
+    assert walk["properties"] == {
+        "transport_mode": "bus",
+        "mode": "pedestrian",
+        "section_type": "pedestrian",
+        "route_index": 0,
+        "section_index": 0,
+        "color": "#6B7280",
+        "line_style": "dashed",
+    }
+    assert walk["geometry"]["type"] == "LineString"
+    assert bus["properties"] == {
+        "transport_mode": "bus",
+        "mode": "bus",
+        "section_type": "transit",
+        "route_index": 0,
+        "section_index": 1,
+        "color": "#e63946",
+        "line_style": "solid",
+        "route_number": "8",
+        "label": "8",
+        "headsign": "Центр",
+    }
+    assert bus["geometry"]["type"] == "LineString"
+    assert bus["geometry"]["coordinates"] == [
+        [8.68752, 50.09878],
+        [8.688, 50.099],
+    ]
+
+
+def test_here_transit_sections_get_distinct_fallback_colors():
+    collection = build_here_routes_geojson([{
+        "transport_mode": "bus",
+        "sections": [
+            {
+                "type": "transit",
+                "transport": {"mode": "bus", "name": "8"},
+                "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+            },
+            {
+                "type": "transit",
+                "transport": {"mode": "bus", "name": "12"},
+                "polyline": "BFs94xJg5g1BsBgD",
+            },
+        ],
+    }])
+
+    first, second = collection["features"]
+    assert first["properties"]["label"] == "8"
+    assert second["properties"]["label"] == "12"
+    assert first["properties"]["color"] != second["properties"]["color"]
 
 
 def test_one_stop_keeps_each_route_once():

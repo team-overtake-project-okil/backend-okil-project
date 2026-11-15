@@ -357,7 +357,9 @@ def test_hexagon_endpoints_include_and_apply_food(
     monkeypatch.setattr(
         hexagons,
         "get_here_routes",
-        AsyncMock(return_value={"routes": []}),
+        AsyncMock(return_value={
+            "routes": {"type": "FeatureCollection", "features": []},
+        }),
     )
 
     row = {

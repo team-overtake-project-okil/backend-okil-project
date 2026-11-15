@@ -126,9 +126,28 @@ class FakeHereClient(FakeClient):
 
     async def get(self, url, *, params):
         self.requests.append((url, params))
-        sections = [{"type": "pedestrian"}]
         if "transit.router.hereapi.com" in url:
-            sections.append({"type": "transit"})
+            sections = [
+                {
+                    "type": "pedestrian",
+                    "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                },
+                {
+                    "type": "transit",
+                    "transport": {
+                        "mode": "bus",
+                        "name": "22",
+                        "color": "#e63946",
+                    },
+                    "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                },
+            ]
+        else:
+            sections = [{
+                "type": "vehicle",
+                "transport": {"mode": "car"},
+                "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+            }]
         return FakeResponse({"routes": [{"sections": sections}]})
 
 
@@ -139,10 +158,18 @@ def test_bus_request_uses_public_transit_api(monkeypatch):
 
     result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03)))
 
-    assert result["routes"][0]["transport_mode"] == "bus"
+    assert result["routes"]["type"] == "FeatureCollection"
+    walk, feature = result["routes"]["features"]
+    assert feature["properties"]["transport_mode"] == "bus"
+    assert feature["properties"]["mode"] == "bus"
+    assert feature["properties"]["label"] == "22"
+    assert walk["properties"]["section_type"] == "pedestrian"
+    assert feature["geometry"]["type"] == "LineString"
+    assert feature["geometry"]["coordinates"][0] == [8.69821, 50.10228]
     url, params = client.requests[0]
     assert url == here_routes.HERE_TRANSIT_URL
     assert params["modes"] == "bus"
+    assert params["alternatives"] == 10
     assert params["return"] == "polyline,actions,travelSummary,intermediate"
     assert "transportMode" not in params
 
@@ -154,10 +181,13 @@ def test_car_request_uses_here_routing_api(monkeypatch):
 
     result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03), "car"))
 
-    assert result["routes"][0]["transport_mode"] == "car"
+    feature = result["routes"]["features"][0]
+    assert feature["properties"]["transport_mode"] == "car"
+    assert feature["properties"]["section_type"] == "vehicle"
     url, params = client.requests[0]
     assert url == here_routes.HERE_ROUTING_URL
     assert params["transportMode"] == "car"
+    assert "alternatives" not in params
     assert params["return"] == "polyline,summary,travelSummary,actions,instructions"
 
 
@@ -168,11 +198,108 @@ def test_both_modes_use_separate_transit_and_car_apis(monkeypatch):
 
     result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03), "both"))
 
-    assert [route["transport_mode"] for route in result["routes"]] == ["bus", "car"]
+    assert [
+        (feature["properties"]["transport_mode"], feature["properties"]["section_type"])
+        for feature in result["routes"]["features"]
+    ] == [("bus", "pedestrian"), ("bus", "transit"), ("car", "vehicle")]
     assert [url for url, _ in client.requests] == [
         here_routes.HERE_TRANSIT_URL,
         here_routes.HERE_ROUTING_URL,
     ]
+
+
+def test_bus_request_expands_alternatives_until_valid_lines_are_found(monkeypatch):
+    monkeypatch.setattr(service.settings, "HERE_ROUTING_API_KEY", "test-key")
+
+    class AlternativesClient(FakeClient):
+        def __init__(self):
+            self.alternative_counts = []
+
+        async def get(self, url, *, params):
+            count = params["alternatives"]
+            self.alternative_counts.append(count)
+            if count < 30:
+                returned_routes = [{"sections": [{
+                    "type": "transit",
+                    "transport": {"mode": "bus", "name": "138"},
+                    "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                }]}]
+            else:
+                returned_routes = [
+                    {"sections": [{
+                        "type": "transit",
+                        "transport": {"mode": "bus", "name": "138"},
+                        "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                    }]},
+                    {"sections": [
+                        {
+                            "type": "transit",
+                            "transport": {"mode": "bus", "name": "22"},
+                            "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                        },
+                        {
+                            "type": "transit",
+                            "transport": {"mode": "bus", "name": "138"},
+                            "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                        },
+                    ]},
+                    {"sections": [{
+                        "type": "transit",
+                        "transport": {"mode": "bus", "name": "22"},
+                        "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                    }]},
+                ]
+            return FakeResponse({"routes": returned_routes})
+
+    client = AlternativesClient()
+    monkeypatch.setattr(here_routes.httpx, "AsyncClient", lambda **kwargs: client)
+
+    result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03)))
+
+    assert client.alternative_counts == [10, 20, 30]
+    assert result["routes"]["features"][0]["properties"]["label"] == "22"
+
+
+def test_bus_request_returns_first_here_route_when_no_valid_route_is_found(monkeypatch):
+    monkeypatch.setattr(service.settings, "HERE_ROUTING_API_KEY", "test-key")
+
+    class NoValidRouteClient(FakeClient):
+        def __init__(self):
+            self.alternative_counts = []
+
+        async def get(self, url, *, params):
+            count = params["alternatives"]
+            self.alternative_counts.append(count)
+            route_number = {10: "138", 20: "139", 30: "140"}[count]
+            return FakeResponse({"routes": [{"sections": [{
+                "type": "transit",
+                "transport": {"mode": "bus", "name": route_number},
+                "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+            }]}]})
+
+    client = NoValidRouteClient()
+    monkeypatch.setattr(here_routes.httpx, "AsyncClient", lambda **kwargs: client)
+
+    result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03)))
+
+    assert client.alternative_counts == [10, 20, 30]
+    assert result["routes"]["features"][0]["properties"]["label"] == "138"
+
+
+def test_route_allowlist_respects_transit_kind_from_user_image():
+    def route(mode, number):
+        return {
+            "sections": [{
+                "type": "transit",
+                "transport": {"mode": mode, "name": number},
+            }],
+        }
+
+    assert here_routes._has_only_valid_transit_routes(route("tram", "7"))
+    assert not here_routes._has_only_valid_transit_routes(route("minibus", "7"))
+    assert not here_routes._has_only_valid_transit_routes(route("trolleybus", "27"))
+    assert here_routes._has_only_valid_transit_routes(route("minibus", "27"))
+    assert not here_routes._has_only_valid_transit_routes(route("bus", "80"))
 
 
 def test_bus_route_does_not_fall_back_to_walking_only_route(monkeypatch):
@@ -188,7 +315,25 @@ def test_bus_route_does_not_fall_back_to_walking_only_route(monkeypatch):
 
     result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03)))
 
-    assert result["routes"] == []
+    assert result["routes"] == {"type": "FeatureCollection", "features": []}
+
+
+def test_invalid_here_polyline_raises_route_format_error(monkeypatch):
+    monkeypatch.setattr(service.settings, "HERE_ROUTING_API_KEY", "test-key")
+
+    class InvalidPolylineClient(FakeHereClient):
+        async def get(self, url, *, params):
+            self.requests.append((url, params))
+            return FakeResponse({
+                "routes": [{"sections": [{"type": "transit", "polyline": "invalid"}]}],
+            })
+
+    monkeypatch.setattr(
+        here_routes.httpx, "AsyncClient", lambda **kwargs: InvalidPolylineClient()
+    )
+
+    with pytest.raises(here_routes.HereRouteFormatError, match="invalid route polyline"):
+        asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03)))
 
 
 def test_here_error_detail_reports_provider_reason_without_api_key():

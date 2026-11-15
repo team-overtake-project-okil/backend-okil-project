@@ -128,7 +128,9 @@ def test_detail_endpoint_returns_only_explanation_and_stored_rating(api, monkeyp
     monkeypatch.setattr(
         hexagon_router,
         "get_here_routes",
-        AsyncMock(return_value={"routes": []}),
+        AsyncMock(return_value={
+            "routes": {"type": "FeatureCollection", "features": []},
+        }),
     )
     monkeypatch.setattr(job, "calculate_distance_score", unexpected_calculation)
     monkeypatch.setattr(job, "get_distance_meters", unexpected_calculation)

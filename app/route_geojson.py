@@ -5,6 +5,17 @@
 import json
 from collections import defaultdict
 
+import flexpolyline
+
+HERE_TRANSIT_COLORS = (
+    "#2563EB",
+    "#DB2777",
+    "#059669",
+    "#D97706",
+    "#7C3AED",
+    "#0891B2",
+)
+
 
 def hex_boundary_to_wkt(boundary) -> str:
     """
@@ -86,6 +97,78 @@ def build_hex_routes_geojson(routes: list, segment_rows: list, fallback_points: 
             },
             "geometry": {"type": "LineString", "coordinates": coords},
         })
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+def build_here_routes_geojson(routes: list[dict]) -> dict:
+    """Convert HERE route sections into separately styled GeoJSON features."""
+    features = []
+    transit_section_index = 0
+    for route_index, route in enumerate(routes):
+        for section_index, section in enumerate(route.get("sections", [])):
+            polyline = section.get("polyline")
+            if not polyline:
+                continue
+            points = flexpolyline.decode(polyline)
+            coordinates = []
+            _extend(coordinates, [[point[1], point[0]] for point in points])
+            if len(coordinates) < 2:
+                continue
+
+            section_type = section.get("type", "unknown")
+            transport = section.get("transport")
+            if not isinstance(transport, dict):
+                transport = {}
+            mode = transport.get("mode") or section_type
+            is_transit = section_type == "transit"
+            route_number = (
+                transport.get("shortName")
+                or transport.get("routeNumber")
+                or transport.get("name")
+            )
+            if route_number is not None:
+                route_number = str(route_number).strip() or None
+
+            color = transport.get("color")
+            if not (
+                isinstance(color, str)
+                and len(color) == 7
+                and color.startswith("#")
+                and all(char in "0123456789abcdefABCDEF" for char in color[1:])
+            ):
+                if section_type == "pedestrian":
+                    color = "#6B7280"
+                elif is_transit:
+                    color = HERE_TRANSIT_COLORS[
+                        transit_section_index % len(HERE_TRANSIT_COLORS)
+                    ]
+                else:
+                    color = "#2563EB"
+
+            properties = {
+                "transport_mode": route.get("transport_mode"),
+                "mode": mode,
+                "section_type": section_type,
+                "route_index": route_index,
+                "section_index": section_index,
+                "color": color,
+                "line_style": "dashed" if section_type == "pedestrian" else "solid",
+            }
+            if is_transit:
+                transit_section_index += 1
+                if route_number:
+                    properties["route_number"] = route_number
+                    properties["label"] = route_number
+                headsign = transport.get("headsign")
+                if isinstance(headsign, str) and headsign.strip():
+                    properties["headsign"] = headsign.strip()
+
+            features.append({
+                "type": "Feature",
+                "properties": properties,
+                "geometry": {"type": "LineString", "coordinates": coordinates},
+            })
 
     return {"type": "FeatureCollection", "features": features}
 
