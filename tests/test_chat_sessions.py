@@ -207,6 +207,82 @@ def test_sessions_do_not_share_history(redis_server):
     run_with_store(redis_server, scenario)
 
 
+# --- clearing a session ---------------------------------------------------------
+
+
+def test_clear_deletes_only_the_given_session_and_reports_it(redis_server):
+    async def scenario(store):
+        target, neighbour = await store.create(), await store.create()
+        kept = await finish(store, neighbour, "req_n", "Питання сусіда", "Відповідь сусіда")
+        await finish(store, target)
+
+        assert await store.clear(target) is True
+
+        assert await store.redis.exists(key_for(target)) == 0
+        assert await store.history(neighbour) == [kept]
+        assert await store.redis.keys("*") == [key_for(neighbour)]
+
+    run_with_store(redis_server, scenario)
+
+
+def test_clear_never_flushes_data_it_does_not_own(redis_server):
+    async def scenario(store):
+        token = await store.create()
+        await store.redis.set("unrelated:key", "keep me")
+        await store.redis.hset("unrelated:hash", "field", "value")
+
+        await store.clear(token)
+
+        assert await store.redis.get("unrelated:key") == "keep me"
+        assert await store.redis.hget("unrelated:hash", "field") == "value"
+
+    run_with_store(redis_server, scenario)
+
+
+def test_clearing_twice_or_clearing_an_expired_session_reports_nothing_deleted(redis_server):
+    async def scenario(store):
+        token = await store.create()
+        assert await store.clear(token) is True
+        assert await store.clear(token) is False
+        assert await store.clear(MISSING_TOKEN) is False
+
+        expired = await store.create()
+        await store.redis.pexpire(key_for(expired), 1)
+        await asyncio.sleep(0.05)
+        assert await store.clear(expired) is False
+
+    run_with_store(redis_server, scenario)
+
+
+@pytest.mark.parametrize("token", ["", "short", "a" * 42, "a" * 44, "a" * 42 + "!", "і" * 43, 123, None])
+def test_clear_validates_the_token_before_touching_redis(redis_server, token):
+    async def scenario(store):
+        survivor = await store.create()
+        assert await error_code(store.clear(token)) == "invalid_message"
+        assert await store.redis.keys("*") == [key_for(survivor)]
+
+    run_with_store(redis_server, scenario)
+
+
+def test_cleared_session_stays_dead_and_a_pending_reply_cannot_recreate_it(redis_server):
+    async def scenario(store):
+        token = await store.create()
+        await store.begin(token, "req_1", "Питання", "attempt", 60)
+
+        await store.clear(token)
+
+        assert await error_code(store.complete(token, "attempt", turn())) == "session_expired"
+        assert await error_code(store.abort(token, "attempt")) == "session_expired"
+        assert await error_code(store.history(token)) == "session_expired"
+        assert await store.redis.keys("*") == []
+
+        fresh = await store.create()
+        assert fresh != token
+        assert await store.history(fresh) == []
+
+    run_with_store(redis_server, scenario)
+
+
 # --- reply claims (begin / complete / abort) ----------------------------------
 
 

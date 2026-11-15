@@ -244,6 +244,69 @@ def test_unknown_message_type_is_rejected_with_its_request_id(client):
     reply.assert_not_awaited()
 
 
+# --- clearing a session -------------------------------------------------------------
+
+
+def clear(ws, token, request_id="clear_1"):
+    ws.send_json({"type": "session.clear", "requestId": request_id, "sessionToken": token})
+    return ws.receive_json()
+
+
+def test_clear_confirms_with_the_exact_payload_and_keeps_other_sessions_intact(client, redis_server):
+    http, reply, _ = client
+    redis = fakeredis.FakeRedis(server=redis_server)
+    with connect(http) as mine, connect(http) as theirs:
+        my_token = open_session(mine)["sessionToken"]
+        their_token = open_session(theirs)["sessionToken"]
+        ask(mine, "req_1", "Моє питання")
+        receive_answer(mine, "req_1")
+        ask(theirs, "req_1", "Чуже питання")
+        receive_answer(theirs, "req_1")
+
+        assert clear(mine, my_token) == {"type": "session.cleared", "requestId": "clear_1", "deleted": True}
+
+        assert redis.keys("*") == [ChatSessionStore._key(their_token).encode()]
+        history = open_session(theirs, their_token)["history"]
+        assert [item["question"] for item in history] == ["Чуже питання"]
+
+
+def test_a_new_conversation_starts_empty_after_clearing(client):
+    http, reply, _ = client
+    with connect(http) as ws:
+        old = open_session(ws)["sessionToken"]
+        ask(ws, "req_1", "Старе питання")
+        receive_answer(ws, "req_1")
+        assert clear(ws, old)["deleted"] is True
+
+        fresh = open_session(ws)
+        assert fresh["sessionToken"] != old
+        assert fresh["history"] == []
+        ask(ws, "req_2", "Нове питання")
+        assert receive_answer(ws, "req_2")["type"] == "answer.completed"
+    assert reply.await_args_list[-1].args == ("Нове питання", [])
+
+
+def test_clearing_an_unknown_session_reports_nothing_deleted_and_changes_nothing(client, redis_server):
+    http, _, _ = client
+    redis = fakeredis.FakeRedis(server=redis_server)
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        redis.delete(ChatSessionStore._key(token))
+        assert clear(ws, token) == {"type": "session.cleared", "requestId": "clear_1", "deleted": False}
+        assert redis.keys("*") == []
+
+
+def test_cleared_token_cannot_be_reopened_and_gets_no_history_back(client):
+    http, _, _ = client
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        ask(ws)
+        receive_answer(ws)
+        clear(ws, token)
+    with connect(http) as ws:
+        assert open_session(ws, token) == error("session_expired", "This chat session has expired.")
+
+
 # --- AI and storage failures never break the chat flow ---------------------------
 
 

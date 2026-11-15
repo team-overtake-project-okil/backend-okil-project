@@ -105,6 +105,17 @@ def test_every_intent_has_a_description_and_a_routing_case():
     assert set(CONTEXTS) == set(Intent), "Add a routing case for the new intent to CONTEXTS and the tests below."
 
 
+def test_intent_scenarios_are_non_empty_and_unique_across_intents():
+    """Each scenario is embedded separately; a duplicate would blur two intents' centroids."""
+    scenarios = [
+        scenario.strip()
+        for description in INTENT_DESCRIPTIONS.values()
+        for scenario in description.split("\n\n")
+    ]
+    assert all(scenarios)
+    assert len(scenarios) == len(set(scenarios))
+
+
 # --- each intent reaches its own service and the model --------------------------
 
 
