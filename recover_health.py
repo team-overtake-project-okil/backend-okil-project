@@ -12,7 +12,7 @@ from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from app.jobs.health_pipeline import (
+from app.jobs.health.health_pipeline import (
     has_valid_coords, match_candidate, normalized, read_csv, write_csv,
     validate_reviewed, automatic_match_name,
 )

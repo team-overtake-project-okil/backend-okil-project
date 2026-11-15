@@ -1,6 +1,6 @@
 """Review-first healthcare POI geocoding and explicitly authorized database import.
 
-Runs from repository root using `python -m app.jobs.health_pipeline ...`.
+Runs from repository root using `python -m app.jobs.health.health_pipeline ...`.
 Never writes database without --write-db --approved-reviewed-file.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import requests
 
-from app.jobs.load_health import FIELDS
+from app.jobs.health.load_health import FIELDS
 
 OUTPUT_FIELDS = (*FIELDS, "matched_title", "matched_address", "match_reason", "reviewed")
 # Wide enough for the Lviv municipality and nearby settlements, not an approval for arbitrary pins.
@@ -283,7 +283,7 @@ def validate_reviewed(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 async def import_reviewed(path: Path, write_db: bool, *, check_db=False,
                           expected_target=None, env_file=None) -> dict:
-    from app.jobs.health_import import run_import
+    from app.jobs.health.health_import import run_import
     return await run_import(path, write_db=write_db, check_db=check_db,
                             expected_target=expected_target, env_file=env_file)
 

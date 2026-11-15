@@ -1,0 +1,2 @@
+# Optional Redis-compatible in-process fixture for the chat integration tests.
+fakeredis>=2.25,<3

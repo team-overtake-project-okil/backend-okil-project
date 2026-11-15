@@ -154,3 +154,14 @@ def test_local_http_exception_is_opt_in(monkeypatch):
     assert local.post("/debug/session", auth=("team", "example")).status_code == 403
     monkeypatch.setattr(settings, "DEBUG_ALLOW_LOCAL_HTTP", True)
     assert local.post("/debug/session", auth=("team", "example")).status_code == 200
+
+
+def test_debugger_uses_the_same_three_nearest_pois_as_main():
+    from app.jobs.count_category_ratings import calculate_top_n_score
+    points = [{"id": i, "lat": 49.84 + i * .002, "lon": 24.03} for i in range(4)]
+    config = SimpleNamespace(radius_of_influence_1=100, radius_of_influence_2=200, radius_of_influence_3=300)
+    inputs = {"cafe": config}, {"food": ["cafe"]}, points, defaultdict(list, cafe=points), [], {}, {}
+    steps = components({"lat": 49.84, "lon": 24.03}, inputs)
+    assert [point["id"] for point in steps[0]["used"]] == [0, 1, 2]
+    assert steps[0]["score"] == pytest.approx(calculate_top_n_score(49.84, 24.03, points, 100, 200, 300))
+    assert sum(point["score"] / 3 for point in steps[0]["used"]) == pytest.approx(steps[0]["score"])

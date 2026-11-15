@@ -8,13 +8,13 @@ import h3
 import openpyxl
 import pytest
 
-from app.jobs.health_import import build_plan, run_import
-from app.jobs.health_pipeline import SOURCE, validate_reviewed, write_csv
-from app.jobs.health_sources import (
+from app.jobs.health.health_import import build_plan, run_import
+from app.jobs.health.health_pipeline import SOURCE, validate_reviewed, write_csv
+from app.jobs.health.health_sources import (
     ACCREDITATION_SOURCE, enrich, exact_address_hit, identifier, load_registry,
     same_provider, split_addresses, street_house, reuse_existing, apply_type_profiles,
 )
-from app.jobs.load_health import categorize, prepare
+from app.jobs.health.load_health import categorize, prepare
 
 
 def provider(**overrides):

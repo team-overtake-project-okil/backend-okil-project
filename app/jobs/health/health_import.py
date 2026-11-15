@@ -8,7 +8,7 @@ import math
 import os
 from pathlib import Path
 
-from app.jobs.health_pipeline import H3_RES, SOURCE, normalized, read_csv, validate_reviewed
+from app.jobs.health.health_pipeline import H3_RES, SOURCE, normalized, read_csv, validate_reviewed
 
 
 def distance_m(first: dict, second: dict) -> float:

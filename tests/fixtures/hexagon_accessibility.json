@@ -1,0 +1,190 @@
+{
+  "hexagon": {
+    "h3_id": "891e7688377ffff",
+    "health": 100,
+    "study": 77,
+    "daily": 100,
+    "mobility": 100,
+    "sport": 99,
+    "enjoyment": 71,
+    "food": 100,
+    "security": 100
+  },
+  "types_data": [
+    {
+      "type": "bank_atm",
+      "category": "daily",
+      "r1": 300,
+      "nearest_point_dist_m": 77.38084172433857,
+      "num_objects_in_radius": 5
+    },
+    {
+      "type": "grocery",
+      "category": "daily",
+      "r1": 150,
+      "nearest_point_dist_m": 107.24300180240363,
+      "num_objects_in_radius": 1
+    },
+    {
+      "type": "pharmacy",
+      "category": "daily",
+      "r1": 200,
+      "nearest_point_dist_m": 48.36596608493782,
+      "num_objects_in_radius": 8
+    },
+    {
+      "type": "post_office",
+      "category": "daily",
+      "r1": 250,
+      "nearest_point_dist_m": 67.58077662116945,
+      "num_objects_in_radius": 1
+    },
+    {
+      "type": "supermarket",
+      "category": "daily",
+      "r1": 300,
+      "nearest_point_dist_m": 280.5492418195894,
+      "num_objects_in_radius": 1
+    },
+    {
+      "type": "cinema",
+      "category": "enjoyment",
+      "r1": 600,
+      "nearest_point_dist_m": 291.896337740577,
+      "num_objects_in_radius": 9
+    },
+    {
+      "type": "mall",
+      "category": "enjoyment",
+      "r1": 600,
+      "nearest_point_dist_m": 177.7124446540558,
+      "num_objects_in_radius": 12
+    },
+    {
+      "type": "museum",
+      "category": "enjoyment",
+      "r1": 600,
+      "nearest_point_dist_m": 26.990621164355204,
+      "num_objects_in_radius": 28
+    },
+    {
+      "type": "playground",
+      "category": "enjoyment",
+      "r1": 150,
+      "nearest_point_dist_m": 387.0844429555118,
+      "num_objects_in_radius": 0
+    },
+    {
+      "type": "bakery",
+      "category": "food",
+      "r1": 200,
+      "nearest_point_dist_m": 88.98397380166293,
+      "num_objects_in_radius": 5
+    },
+    {
+      "type": "cafe",
+      "category": "food",
+      "r1": 450,
+      "nearest_point_dist_m": 103.95040227250573,
+      "num_objects_in_radius": 16
+    },
+    {
+      "type": "coffee_shop",
+      "category": "food",
+      "r1": 200,
+      "nearest_point_dist_m": 36.437038331737476,
+      "num_objects_in_radius": 18
+    },
+    {
+      "type": "fast_food",
+      "category": "food",
+      "r1": 500,
+      "nearest_point_dist_m": 89.62296977808712,
+      "num_objects_in_radius": 22
+    },
+    {
+      "type": "pub_bar",
+      "category": "food",
+      "r1": 450,
+      "nearest_point_dist_m": 55.014147718455504,
+      "num_objects_in_radius": 27
+    },
+    {
+      "type": "restaurant",
+      "category": "food",
+      "r1": 850,
+      "nearest_point_dist_m": 67.88339068397362,
+      "num_objects_in_radius": 87
+    },
+    {
+      "type": "dentistry",
+      "category": "health",
+      "r1": 400,
+      "nearest_point_dist_m": 187.2232727638249,
+      "num_objects_in_radius": 1
+    },
+    {
+      "type": "hospital",
+      "category": "health",
+      "r1": 800,
+      "nearest_point_dist_m": 545.3530445703802,
+      "num_objects_in_radius": 2
+    },
+    {
+      "type": "polyclinic",
+      "category": "health",
+      "r1": 400,
+      "nearest_point_dist_m": 152.23950166555372,
+      "num_objects_in_radius": 1
+    },
+    {
+      "type": "gtfs_stop",
+      "category": "mobility",
+      "r1": 200,
+      "nearest_point_dist_m": 57.9798978184129,
+      "num_objects_in_radius": 5
+    },
+    {
+      "type": "shelter",
+      "category": "security",
+      "r1": 100,
+      "nearest_point_dist_m": 10.06437886444634,
+      "num_objects_in_radius": 14
+    },
+    {
+      "type": "gym",
+      "category": "sport",
+      "r1": 400,
+      "nearest_point_dist_m": 89.81187244880688,
+      "num_objects_in_radius": 7
+    },
+    {
+      "type": "sport_ground",
+      "category": "sport",
+      "r1": 200,
+      "nearest_point_dist_m": 212.29710586328054,
+      "num_objects_in_radius": 0
+    },
+    {
+      "type": "stadium",
+      "category": "sport",
+      "r1": 800,
+      "nearest_point_dist_m": 403.8556146238344,
+      "num_objects_in_radius": 2
+    },
+    {
+      "type": "kindergarten",
+      "category": "study",
+      "r1": 300,
+      "nearest_point_dist_m": 657.253215138662,
+      "num_objects_in_radius": 0
+    },
+    {
+      "type": "school",
+      "category": "study",
+      "r1": 400,
+      "nearest_point_dist_m": 223.25765558808416,
+      "num_objects_in_radius": 2
+    }
+  ]
+}

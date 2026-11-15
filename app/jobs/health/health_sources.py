@@ -14,8 +14,8 @@ import re
 import time
 from pathlib import Path
 
-from app.jobs.load_health import build_address, categorize, clean, prepare, read_xls
-from app.jobs.health_pipeline import has_valid_coords, read_csv, write_csv, match_candidate, search_key
+from app.jobs.health.load_health import build_address, categorize, clean, prepare, read_xls
+from app.jobs.health.health_pipeline import has_valid_coords, read_csv, write_csv, match_candidate, search_key
 
 ACCREDITATION_SOURCE = "moz_accredited_health"
 REGIONAL_SOURCE = "lviv_oblast_health_registry"
@@ -305,7 +305,7 @@ def enrich(rows: list[dict], cache_path: Path, *, live=False, limit=0,
             continue
         # Existing SerpAPI responses stay usable without new paid requests.
         hits = serp.get(search_key(row), [])
-        from app.jobs.health_pipeline import automatic_match_name
+        from app.jobs.health.health_pipeline import automatic_match_name
         hit, _ = match_candidate(row, hits)
         if hit and automatic_match_name({**row, 'matched_title': hit.get('title', '')}):
             item.update(latitude=str(hit['gps_coordinates']['latitude']), longitude=str(hit['gps_coordinates']['longitude']),

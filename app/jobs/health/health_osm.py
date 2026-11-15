@@ -15,9 +15,9 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
-from app.jobs.health_import import distance_m
-from app.jobs.health_pipeline import has_valid_coords, read_csv, write_csv
-from app.jobs.health_sources import compact, house_key, street_house, street_matches
+from app.jobs.health.health_import import distance_m
+from app.jobs.health.health_pipeline import has_valid_coords, read_csv, write_csv
+from app.jobs.health.health_sources import compact, house_key, street_house, street_matches
 
 SOURCE = 'openstreetmap_health'
 ATTRIBUTION = '© OpenStreetMap contributors, ODbL: https://www.openstreetmap.org/copyright'
@@ -103,7 +103,7 @@ def inherit_building_addresses(features: list[dict], path: Path) -> int:
     import osmium
     from shapely.geometry import shape
     from shapely.strtree import STRtree
-    from app.jobs.health_sources import house_key,street_matches
+    from app.jobs.health.health_sources import house_key,street_matches
     targets,points=[],[]
     for feature in features:
         if feature['tags'].get('addr:street') and feature['tags'].get('addr:housenumber'):

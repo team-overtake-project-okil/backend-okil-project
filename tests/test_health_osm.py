@@ -5,12 +5,12 @@ import h3
 import pytest
 from shapely.geometry import Point,Polygon
 
-from app.jobs.health_osm import (
+from app.jobs.health.health_osm import (
     SOURCE,classification,inactive,inherit_building_addresses,prepare,read_features,
     same_institution,to_record,
 )
-from app.jobs.health_import import build_plan
-from app.jobs.health_pipeline import validate_reviewed
+from app.jobs.health.health_import import build_plan
+from app.jobs.health.health_pipeline import validate_reviewed
 
 TODAY=date(2026,11,2)
 GRID={h3.latlng_to_cell(49.84,24.03,9)}

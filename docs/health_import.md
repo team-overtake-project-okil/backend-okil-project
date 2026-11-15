@@ -46,7 +46,7 @@ caches, snapshots, CSVs and reports in an external working directory, outside
 Git. Existing reviewed staging CSVs remain compatible.
 
 ```powershell
-python -m app.jobs.health_sources `
+python -m app.jobs.health.health_sources `
   --file "C:/data/health.xls" `
   --file "C:/data/accredited.xlsx" `
   --file "C:/data/comunal_healthcare_institutions_lvivska.xlsx" `
@@ -93,7 +93,7 @@ resolve duplicates without collapsing separate practitioners. No point is delete
 Offline validation does not load DB configuration or create an engine:
 
 ```powershell
-python -m app.jobs.health_pipeline import --input "C:/work/health-reviewed.csv"
+python -m app.jobs.health.health_pipeline import --input "C:/work/health-reviewed.csv"
 ```
 
 To check real point types, existing records and the H3 grid, use a PostgreSQL
@@ -101,7 +101,7 @@ read-only transaction. This produces separate insert/update/unchanged/skip
 counts and a safe target fingerprint:
 
 ```powershell
-python -m app.jobs.health_pipeline import `
+python -m app.jobs.health.health_pipeline import `
   --input "C:/work/health-reviewed.csv" --check-db `
   --env-file ".env" --report "C:/work/health-db-plan.json"
 ```
@@ -111,7 +111,7 @@ plan, a write requires all three switches below. Substitute the fingerprint
 from the checked plan:
 
 ```powershell
-python -m app.jobs.health_pipeline import `
+python -m app.jobs.health.health_pipeline import `
   --input "C:/work/health-reviewed.csv" --write-db --approved-reviewed-file `
   --expected-target APPROVED_FINGERPRINT --env-file ".env" `
   --report "C:/work/health-written.json"
@@ -154,7 +154,7 @@ and preserve its timestamp, checksum and OSM attribution. Keep the large raw
 extract outside Git. `osmium` and Shapely 2 are required by this reader.
 
 ```powershell
-python -m app.jobs.health_osm `
+python -m app.jobs.health.health_osm `
   --file "C:/data/lviv_oblast-latest.osm.pbf" `
   --snapshot "C:/work/health-database-snapshot.json" `
   --known-records "C:/work/health-reviewed.csv" `

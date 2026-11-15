@@ -15,6 +15,7 @@ from app.config import settings
 from app.database import get_async_db
 from app.scoring import SYSTEM_WEIGHTS, calculate_category_ratings, calculate_overall_rating
 from app.models import PointType, Point, Stop
+from app.schemas import HexagonWeights
 from app.category_calculation import effective_radii
 from sqlalchemy import select, cast, String, literal, union_all, or_
 from geoalchemy2 import Geometry
@@ -188,9 +189,9 @@ async def config(db=Depends(get_async_db)):
 
 
 @protected_router.get("/ratings")
-async def ratings(db=Depends(get_async_db)):
+async def ratings(weights: Annotated[HexagonWeights, Query()], db=Depends(get_async_db)):
     cells = await load_hexes(db)
-    return [dict(h3_id=cell["h3_id"], overall_rating=calculate_overall_rating(cell, defaults),
+    return [dict(h3_id=cell["h3_id"], overall_rating=calculate_overall_rating(cell, weights.model_dump()),
                  category_scores={key: cell[key] or 0 for key in SYSTEM_WEIGHTS}) for cell in cells]
 
 
@@ -264,7 +265,7 @@ async def points(cell_id: str, offset: int = Query(0, ge=0), limit: int = Query(
         rows.append(dict(p, inside=inside, mismatch=actual != p["h3_id"], used=bool(step),
                          category=config.category if config else None,
                          distance=get_distance_meters(cell["lat"],cell["lon"],p["lat"],p["lon"]),
-                         contribution=step["contribution"] if step and p["kind"] == "poi" else None,
+                         contribution=next(item["score"] for item in step["used"] if item["id"] == p["id"]) * step["weight"] / len(step["used"]) if step and p["kind"] == "poi" else None,
                          weight=step["weight"] if step else 0))
     rows.sort(key=lambda point: (point["category"] or "", point["distance"], point["kind"], point["id"]))
     return {"rows": rows[offset:offset + limit], "total": len(rows)}

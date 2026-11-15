@@ -7,33 +7,10 @@ from sqlalchemy import String, cast, select
 from app.models import HexTable, Point, PointType, Stop, StopRouteConnectable
 from app.scoring import SYSTEM_WEIGHTS
 
-REF_LAT = 49.84
-METERS_PER_LAT = 111139.0
-METERS_PER_LON = 111139.0 * math.cos(math.radians(REF_LAT))
-
-
-def get_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Обчислює відстань у метрах між двома точками."""
-    dy = (lat1 - lat2) * METERS_PER_LAT
-    dx = (lon1 - lon2) * METERS_PER_LON
-    return math.hypot(dx, dy)
-
-
-def calculate_distance_score(d: float, r1: float, r2: float, r3: float) -> float:
-    """Обчислює бали (0..100) залежно від відстані d та радіусів r1, r2, r3."""
-    if d is None or math.isinf(d):
-        return 0.0
-
-    if d <= r1:
-        return 100.0
-    elif d <= r2:
-        return 100.0 - 40.0 * ((d - r1) / (r2 - r1))
-    elif d <= r3:
-        return 60.0 - 40.0 * ((d - r2) / (r3 - r2))
-    else:
-        score = 20.0 * math.exp(-(d - r3) / r3)
-        return max(0.0, score)
-
+from app.jobs.count_category_ratings import (
+    get_distance_meters, calculate_distance_score, get_radius, TOP_N_POINTS,
+)
+from app.rounding import round_final
 
 
 async def load_inputs(session):
@@ -75,7 +52,7 @@ async def load_hexes(session, ids=None):
 
 def effective_radii(name, category, config):
     defaults = (200, 400, 700 if name == "gtfs_stop" else 800) if category == "mobility" else (300, 600, 1200)
-    return [getattr(config, f"radius_of_influence_{i}", None) or default
+    return [get_radius(config, f"radius_of_influence_{i}", default)
             for i, default in enumerate(defaults, 1)]
 
 
@@ -109,10 +86,10 @@ def components(cell, inputs):
                 step.update(score=min(100, 100 * (math.log1p(raw) / math.log(20))),
                             penalty=penalty, destinations=reachable, network_score=raw)
             elif by_type[name]:
-                point = min(by_type[name], key=distance)
-                d = distance(point)
-                step.update(score=calculate_distance_score(d, *radii),
-                            used=[dict(id=point["id"], kind="poi", distance=d)])
+                nearest = sorted(by_type[name], key=distance)[:TOP_N_POINTS]
+                scores = [calculate_distance_score(distance(point), *radii) for point in nearest]
+                step.update(score=sum(scores) / len(scores),
+                            used=[dict(id=point["id"], kind="poi", distance=distance(point), score=score) for point, score in zip(nearest, scores)])
             steps.append(step)
     return steps
 
@@ -129,4 +106,4 @@ def aggregate(steps, weights):
         contribution = share * step["score"]
         scores[category] += contribution
         trace.append(dict(step, weight=share, contribution=contribution))
-    return {name: round(value) for name, value in scores.items()}, trace
+    return {name: round_final(value) for name, value in scores.items()}, trace
