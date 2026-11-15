@@ -39,13 +39,15 @@ def _here_error_detail(error: httpx.HTTPStatusError) -> str:
 
 @router.get("", response_model=list[HexagonRatingResponse])
 async def get_hexagons(
-    weights: Annotated[HexagonWeights, Query()],
+    weights: Annotated[HexagonWeights, Depends()],
     transportation: str = Query(default="bus"),
     anchor_lat: list[float] | None = Query(default=None),
     anchor_lon: list[float] | None = Query(default=None),
     weight: list[float] | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
+    if not settings.EXTERNAL_TRANSPORT_ENABLED:
+        weights = weights.model_copy(update={"mobility": 0.0})
     hexagons = await fetch_hexagons(db)
     anchors = None
     if anchor_lat is not None or anchor_lon is not None or weight is not None:
@@ -87,13 +89,15 @@ async def get_hexagons(
 @router.get("/{h3_id}", response_model=HexagonDetailResponse)
 async def get_hexagon(
     h3_id: str,
-    weights: Annotated[HexagonWeights, Query()],
+    weights: Annotated[HexagonWeights, Depends()],
     transportation: str = Query(default="bus"),
     anchor_lat: list[float] | None = Query(default=None),
     anchor_lon: list[float] | None = Query(default=None),
     weight: list[float] | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
+    if not settings.EXTERNAL_TRANSPORT_ENABLED:
+        weights = weights.model_copy(update={"mobility": 0.0})
     hexagon = await fetch_hexagon(db, h3_id)
     if hexagon is None:
         raise HTTPException(status_code=404, detail="Hexagon not found")
@@ -120,31 +124,33 @@ async def get_hexagon(
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="TravelTime API request failed") from exc
 
-    if not settings.HERE_ROUTING_API_KEY:
-        raise HTTPException(status_code=503, detail="HERE API is not configured")
-    result = await db.execute(
-        select(
-            HexTable.geom.cast(Geometry).ST_Y().label("lat"),
-            HexTable.geom.cast(Geometry).ST_X().label("lon"),
-        ).where(cast(HexTable.h3_id, String) == h3_id)
-    )
-    row = result.mappings().first()
-    if row is None:
-        raise HTTPException(status_code=404, detail="Hexagon not found")
-    try:
-        route_result = await get_here_routes(
-            h3_id, (float(row["lat"]), float(row["lon"])), transportation, LVIV_CENTER
+    routes = []
+    if settings.EXTERNAL_TRANSPORT_ENABLED:
+        if not settings.HERE_ROUTING_API_KEY:
+            raise HTTPException(status_code=503, detail="HERE API is not configured")
+        result = await db.execute(
+            select(
+                HexTable.geom.cast(Geometry).ST_Y().label("lat"),
+                HexTable.geom.cast(Geometry).ST_X().label("lon"),
+            ).where(cast(HexTable.h3_id, String) == h3_id)
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=502, detail=_here_error_detail(exc)) from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"HERE API request failed ({type(exc).__name__})",
-        ) from exc
-    routes = route_result["routes"]
+        row = result.mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Hexagon not found")
+        try:
+            route_result = await get_here_routes(
+                h3_id, (float(row["lat"]), float(row["lon"])), transportation, LVIV_CENTER
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=502, detail=_here_error_detail(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"HERE API request failed ({type(exc).__name__})",
+            ) from exc
+        routes = route_result["routes"]
 
     hexagon = {**hexagon, "mobility": mobility_score}
     user_weights = weights.model_dump()
