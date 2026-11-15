@@ -209,7 +209,7 @@ def mobility_options(
 
 async def current_mobility(cells, options, enabled=True):
     scores = {}
-    if enabled:
+    if enabled and settings.EXTERNAL_TRANSPORT_ENABLED:
         try:
             scores = await get_mobility_scores([c["h3_id"] for c in cells], *options)
         except ValueError as exc:
@@ -224,6 +224,8 @@ async def current_mobility(cells, options, enabled=True):
 @protected_router.get("/ratings")
 async def ratings(weights: Annotated[HexagonWeights, Query()], db=Depends(get_async_db),
                   options=Depends(mobility_options)):
+    if not settings.EXTERNAL_TRANSPORT_ENABLED:
+        weights = weights.model_copy(update={"mobility": 0.0})
     cells = await current_mobility(await load_hexes(db), options, weights.mobility > 0)
     return [dict(h3_id=cell["h3_id"], overall_rating=calculate_overall_rating(cell, weights.model_dump()),
                  category_scores={key: cell[key] or 0 for key in SYSTEM_WEIGHTS}) for cell in cells]
@@ -239,17 +241,20 @@ def evaluate(cell, inputs, request, detail):
     fresh, baseline = aggregate(steps, {})
     experiment, trace = aggregate(steps, request.types)
     fresh["mobility"] = experiment["mobility"] = cell["mobility"]
-    weights = defaults | request.categories
-    result = {"h3_id": cell["h3_id"], "stored": calculate_overall_rating(cell, defaults),
-              "fresh": calculate_overall_rating(fresh, defaults),
+    baseline_weights = defaults if settings.EXTERNAL_TRANSPORT_ENABLED else defaults | {"mobility": 0}
+    weights = baseline_weights | request.categories
+    if not settings.EXTERNAL_TRANSPORT_ENABLED:
+        weights["mobility"] = 0
+    result = {"h3_id": cell["h3_id"], "stored": calculate_overall_rating(cell, baseline_weights),
+              "fresh": calculate_overall_rating(fresh, baseline_weights),
               "experiment": calculate_overall_rating(experiment, weights),
               "category_scores": {"stored": {key: cell.get(key) or 0 for key in SYSTEM_WEIGHTS},
                                   "fresh": {key: fresh.get(key, 0) for key in SYSTEM_WEIGHTS},
                                   "experiment": {key: experiment.get(key, 0) for key in SYSTEM_WEIGHTS}}}
     if detail:
         result.update(steps=trace, baseline_steps=baseline, categories={
-            "stored": calculate_category_ratings(cell, defaults),
-            "fresh": calculate_category_ratings(fresh, defaults),
+            "stored": calculate_category_ratings(cell, baseline_weights),
+            "fresh": calculate_category_ratings(fresh, baseline_weights),
             "experiment": calculate_category_ratings(experiment, weights)})
     return result
 

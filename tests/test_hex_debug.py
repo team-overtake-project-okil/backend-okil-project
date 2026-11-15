@@ -229,3 +229,23 @@ def test_debug_traveltime_failure_is_explicit(mobility_client, error, status):
     service.side_effect = error
     assert client.get("/debug/ratings").status_code == status
     assert client.get(f"/debug/hexagons/{cell_id}").status_code == status
+
+
+def test_external_transport_disabled_excludes_mobility_everywhere(mobility_client, monkeypatch):
+    client, service, cell_id = mobility_client
+    monkeypatch.setattr(settings, "EXTERNAL_TRANSPORT_ENABLED", False)
+    service.side_effect = RuntimeError("No credentials")
+    response = client.get("/debug/ratings?weight_mobility=5")
+    assert response.status_code == 200
+    assert response.json()[0]["overall_rating"] == 100
+    for response in (client.get(f"/debug/hexagons/{cell_id}"),
+                     client.post("/debug/recalculate", json={"ids": [cell_id], "selected": cell_id,
+                                                           "categories": {"mobility": 5}})):
+        assert response.status_code == 200
+        body = response.json()
+        body = body[0] if isinstance(body, list) else body
+        for mode in ("stored", "fresh", "experiment"):
+            assert body[mode] == 100
+            mobility = next(c for c in body["categories"][mode] if c["category"] == "mobility")
+            assert mobility["enabled"] is False
+    service.assert_not_awaited()
