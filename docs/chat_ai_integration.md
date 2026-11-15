@@ -1,8 +1,9 @@
-# Chat WebSocket → AI service (#74)
+# Chat WebSocket → AI service (#74, #86)
 
 The adapter connects the `/ws/chat` endpoint from PR #67 to the classifier,
 `GroqClient` and `answer_intent` from PR #69. It does not reimplement the model,
-change scoring, add a chat REST endpoint or change Redis session storage.
+change scoring or add a chat REST endpoint. Issue #86 adds an optional
+`nextPrompt` to completed events and stored history turns.
 
 ## Dependencies and setup
 
@@ -10,8 +11,9 @@ PR #69 (`feat/add-ai_model-validation`) supplies `app.ai_assistant`,
 `app.intent_classifier`, model dependencies and database context builders.
 At implementation time, its reviewed head was
 `0202119c576f059328b161dbc085f387d0ca728b` and it was not merged into main.
-For the assembled local project, this branch includes unchanged copies of
-`app/ai_assistant.py` and `app/intent_classifier.py` from that exact revision.
+The original local assembly included unchanged copies of `app/ai_assistant.py`
+and `app/intent_classifier.py` from that exact revision. Issue #86 extends
+`GroqClient` with optional next-prompt generation; the classifier is unchanged.
 It deliberately does not import the upstream scoring changes, vector table or
 DDL. `sentence-transformers` is included in requirements. Lazy initialization
 still returns `ai_unavailable` when a deployment lacks the model or key.
@@ -74,7 +76,9 @@ The event sequence remains `message.accepted`, `answer.status` with stage
 
    A later `Які тут місця?` can reuse that H3 from completed Redis history.
 5. `answer_intent` builds factual DB context and returns the upstream answer.
-   Valid nonempty answers are saved before `answer.completed` is sent.
+6. Optional next-prompt generation enriches the answer within the remaining
+   reply budget. The answer and any valid suggestion are saved together before
+   `answer.completed` is sent.
 
 The current UI prefixes text with the selected H3, displayed score and
 category scores. The adapter removes that specific header before classifying
@@ -83,8 +87,52 @@ PostgreSQL, not trusted from client text. Explicit project FAQs and requests
 to explain a hex score receive narrow routing corrections for observed
 classifier confusion. Other parts continue through the upstream classifier.
 Custom user weights are not passed to answer_intent, so AI score context uses
-server defaults. The upstream API does not accept a general transcript: Redis
-preserves history, and the adapter reuses only supported H3 context.
+server defaults. Main-answer generation does not accept a general transcript:
+Redis preserves history, and the main-answer adapter reuses only supported H3
+context. Suggestion generation uses the limited context described below.
+
+## Contextual next-prompts (#86)
+
+After a successful main answer, `generate_next_prompt` asks the existing Groq
+client for one optional follow-up question, phrased as a question the user can
+send to the assistant. It uses the same key and configured model. There is one
+additional provider request per eligible new answer; duplicate request IDs reuse
+the saved result without either provider request.
+
+The suggestion request includes the current question (without the map's score
+header), up to 8,000 characters of the main answer, a validated H3 ID when
+available, the last three user questions and the last three saved suggestions.
+Session tokens and request IDs are not included. H3 context comes only from user
+questions, never from model output. Unlike the main-answer classifier path, the
+suggestion request includes the whole current question; its prompt treats this
+as context, not as instructions.
+
+The prompt limits suggestions to supported OKIL topics, requires H3 context for
+questions about a specific cell, and requests `null` when a follow-up would be
+irrelevant or the available information is insufficient. The unrelated-question
+reply skips suggestion generation entirely. The model returns internal JSON;
+the WebSocket exposes only the extracted plain string:
+
+```json
+{"type":"answer.completed","requestId":"req_1","text":"<main answer>","nextPrompt":"Які категорії оцінює OKIL?"}
+```
+
+Suggestions longer than 240 characters, empty values, non-string values,
+multiline text, markup and links are rejected. Exact repeats of the current or
+saved questions/suggestions are rejected after case, punctuation and whitespace
+normalization. Semantic relevance and paraphrase avoidance rely on the model.
+When omitted, `nextPrompt` is absent rather than an empty string or JSON object.
+
+The optional step has a three-second timeout, further limited by whatever
+remains of the existing 30-second generation budget. A timeout, provider error,
+invalid JSON or rejected suggestion returns the ready main answer without the
+field. No extra retry or fallback model is used. Disconnect cancellation still
+propagates and releases the session claim.
+
+History stores the same optional `nextPrompt`, so reconnects and duplicate
+requests return the original suggestion. Old Redis turns without that field
+continue to work without migration. The existing frontend can ignore the new
+field; rendering a suggestion is outside this backend task.
 
 ## Errors and session guarantees
 
@@ -114,12 +162,15 @@ settings and other endpoints remain unchanged.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r tests/requirements-chat.txt
-.\.venv\Scripts\python.exe -m pytest tests/test_chat_service.py tests/test_chat_websocket.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_ai_assistant.py tests/test_chat_service.py tests/test_chat_websocket.py tests/test_chat_startup.py -q
 ```
 
 The WebSocket tests use a Redis-compatible in-process fake and real session
 store operations; no shared Redis or PostgreSQL data is touched. Unit tests
 exercise the adapter contract without downloading models or using credentials.
+Next-prompt checks cover contextual output, omission, repeated/malformed output,
+provider failure, deadline exhaustion, persistence, reconnect and duplicate
+requests. These checks mock Groq and do not measure live suggestion quality.
 
 Controlled integration also used the unchanged service/classifier modules from
 PR #69 and the unchanged React `Chat.tsx` from PR #95. The actual component was

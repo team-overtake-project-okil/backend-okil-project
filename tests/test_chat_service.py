@@ -291,3 +291,89 @@ def test_failure_after_generation_started_does_not_retry_provider():
         asyncio.run(service.reply("OKIL", []))
     db.execute.assert_awaited_once()
     answer.assert_awaited_once()
+
+
+@pytest.fixture
+def next_prompt_client(monkeypatch):
+    client = SimpleNamespace(next_prompt=AsyncMock(return_value="Які місця є в цій ділянці?"))
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=SimpleNamespace(client=client)))
+    return client
+
+
+def test_next_prompt_uses_current_answer_and_explicit_context(next_prompt_client):
+    history = [turn(f"Поясни оцінку {CELL}")]
+    history[0]["nextPrompt"] = "Як працює OKIL?"
+    question = "Чому така оцінка?"
+    text = f"Ділянка Львова (H3: {OTHER_CELL}). Оцінка комфорту: 999/100. Категорії: Освіта: 999/100.\n\n{question}"
+    assert asyncio.run(chat_service.generate_next_prompt(text, "Оцінка 79", history)) == "Які місця є в цій ділянці?"
+    next_prompt_client.next_prompt.assert_awaited_once_with(
+        question, "Оцінка 79", OTHER_CELL, [history[0]["question"]], ["Як працює OKIL?"],
+    )
+
+
+def test_next_prompt_can_use_previous_user_hex_but_never_model_hex(next_prompt_client):
+    asyncio.run(chat_service.generate_next_prompt("Чому?", "Оцінка 79", [turn(CELL)]))
+    assert next_prompt_client.next_prompt.await_args.args[2] == CELL
+    asyncio.run(chat_service.generate_next_prompt("Що таке OKIL?", CELL, []))
+    assert next_prompt_client.next_prompt.await_args.args[2] is None
+
+
+@pytest.mark.parametrize("suggestion", [
+    None, "", "  ", {"text": "Питання?"}, "а" * 241,
+    "Перше питання?\nДруге питання?", "<b>Питання?</b>", "**Питання?**",
+    "[Питання](https://example.com)", "Дивись https://example.com", "```json```",
+    '{"next_prompt": "Питання?"}', "ЩО таке OKIL?!", "Як працює карта?",
+    "Які категорії оцінює OKIL?",
+])
+def test_invalid_or_repeated_next_prompts_are_omitted(next_prompt_client, suggestion):
+    next_prompt_client.next_prompt.return_value = suggestion
+    previous = turn("Як працює карта?")
+    previous["nextPrompt"] = "Які категорії оцінює OKIL?"
+    assert asyncio.run(chat_service.generate_next_prompt("Що таке OKIL?", "Опис", [previous])) is None
+
+
+def test_unrelated_answer_or_exhausted_deadline_does_not_call_ai(next_prompt_client):
+    assert asyncio.run(chat_service.generate_next_prompt("Рецепт", chat_service.UNRELATED_REPLY, [])) is None
+    assert asyncio.run(chat_service.generate_next_prompt("OKIL", "Опис", [], timeout_seconds=0)) is None
+    next_prompt_client.next_prompt.assert_not_awaited()
+
+
+def test_next_prompt_failure_is_optional_and_logs_no_provider_details(next_prompt_client, caplog):
+    next_prompt_client.next_prompt.side_effect = RuntimeError("Bearer SECRET; raw provider body")
+    with caplog.at_level("INFO", logger="app.chat_service"):
+        assert asyncio.run(chat_service.generate_next_prompt("OKIL", "Опис", [])) is None
+    assert "RuntimeError" in caplog.text
+    assert "SECRET" not in caplog.text
+
+
+def test_next_prompt_timeout_cancels_provider(next_prompt_client):
+    cancelled = False
+
+    async def pending(*args):
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled = True
+
+    next_prompt_client.next_prompt.side_effect = pending
+    assert asyncio.run(chat_service.generate_next_prompt("OKIL", "Опис", [], timeout_seconds=0.01)) is None
+    assert cancelled
+
+
+def test_next_prompt_cancellation_is_not_swallowed(next_prompt_client):
+    async def scenario():
+        started = asyncio.Event()
+
+        async def pending(*args):
+            started.set()
+            await asyncio.Event().wait()
+
+        next_prompt_client.next_prompt.side_effect = pending
+        task = asyncio.create_task(chat_service.generate_next_prompt("OKIL", "Опис", []))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())

@@ -157,7 +157,8 @@ sending questions. To start a new conversation, send:
 `session.ready` contains `sessionToken` and `history`. Store only the token in
 the frontend's `sessionStorage`. On a new connection, send
 `{"type":"session.open","sessionToken":"<stored-token>"}` to restore the chat.
-Each history entry has `requestId`, `question`, and `answer`. If the backend
+Each history entry has `requestId`, `question`, and `answer`, plus an optional
+plain-text `nextPrompt`. Older entries without it remain valid. If the backend
 returns `session_expired`, remove the stored token and send `session.open`
 without it. Treat the token as a secret and keep it out of URLs and logs.
 
@@ -175,9 +176,25 @@ The backend sends events for the same `requestId`:
 {"type":"answer.completed","requestId":"req_1","text":"<AI answer>"}
 ```
 
+The completed event can also include a contextual follow-up question:
+
+```json
+{"type":"answer.completed","requestId":"req_1","text":"<AI answer>","nextPrompt":"Які категорії оцінює OKIL?"}
+```
+
+`nextPrompt` is a plain string, omitted when no suitable suggestion is available.
+The backend generates it through the configured Groq model after the main
+answer, using at most 3 seconds of the remaining 30-second reply budget.
+Provider errors, invalid output and suggestion timeouts still deliver the main
+answer. The suggestion is stored with the turn and reused for duplicate requests.
+Existing clients can keep using `text`; displaying or sending the suggestion is
+a separate frontend change. See [next-prompt behavior](docs/chat_ai_integration.md#contextual-next-prompts-86)
+for context limits and validation.
+
 The chat adapter uses the AI classifier and `answer_intent` service from
 [PR #69](https://github.com/team-overtake-project-okil/backend-okil-project/pull/69).
-This branch includes the two unchanged AI modules from that PR; their Python
+The AI modules originated in that PR, with optional next-prompt generation added
+in #86; their Python
 dependencies, intent model and `GROQ_API_KEY` must be configured. Until then the socket returns a
 readable `ai_unavailable` error; it never substitutes a test reply.
 See [chat AI integration](docs/chat_ai_integration.md) for setup, context,

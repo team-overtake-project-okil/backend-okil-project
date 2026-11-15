@@ -11,6 +11,9 @@ from sqlalchemy.exc import DBAPIError
 from app.chat_sessions import ChatTurn
 
 REPLY_TIMEOUT_SECONDS = 30
+NEXT_PROMPT_TIMEOUT_SECONDS = 3.0
+MAX_NEXT_PROMPT_LENGTH = 240
+UNRELATED_REPLY = "Я допомагаю з питаннями про OKIL, оцінки ділянок і місця в них. Уточніть запитання."
 H3_ID_PATTERN = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{15}(?![0-9a-fA-F])")
 logger = logging.getLogger(__name__)
 UI_CONTEXT_PREFIX = re.compile(
@@ -106,7 +109,7 @@ class ChatAIService:
         parts.extend((part, intent) for part in parsed.unrelated_parts
                      if (intent := self._explicit_intent(part)) is not None)
         if not parts:
-            return "Я допомагаю з питаннями про OKIL, оцінки ділянок і місця в них. Уточніть запитання."
+            return UNRELATED_REPLY
 
         needs_hex = any(
             intent.value in {"poi", "hex_score"}
@@ -185,3 +188,58 @@ async def generate_reply(text: str, history: Sequence[ChatTurn]) -> str:
         raise ChatReplyError(
             "ai_failed", "Не вдалося отримати відповідь AI-сервісу. Спробуйте ще раз."
         ) from None
+
+
+def _question_text(text: str) -> str:
+    match = UI_CONTEXT_PREFIX.fullmatch(text)
+    return match.group("question") if match else text
+
+
+def _normalized_prompt(text: str) -> str:
+    return " ".join(re.findall(r"\w+", text.casefold()))
+
+
+def _validated_next_prompt(suggestion: str | None, previous_texts: Sequence[str]) -> str | None:
+    if not isinstance(suggestion, str):
+        return None
+    suggestion = suggestion.strip()
+    # Keep this an optional plain-text field, never provider JSON, markup or links.
+    if (
+        not suggestion
+        or len(suggestion) > MAX_NEXT_PROMPT_LENGTH
+        or any(not char.isprintable() for char in suggestion)
+        or re.search(r"[<>{}\[\]`*_#]|https?://|www\.", suggestion, re.IGNORECASE)
+    ):
+        return None
+    normalized = _normalized_prompt(suggestion)
+    if not normalized or normalized in {_normalized_prompt(text) for text in previous_texts}:
+        return None
+    return suggestion
+
+
+async def generate_next_prompt(
+    text: str,
+    answer: str,
+    history: Sequence[ChatTurn],
+    *,
+    timeout_seconds: float = NEXT_PROMPT_TIMEOUT_SECONDS,
+) -> str | None:
+    """Best-effort enrichment; a provider failure must never discard a ready answer."""
+    if timeout_seconds <= 0 or answer == UNRELATED_REPLY:
+        return None
+    try:
+        async with asyncio.timeout(min(timeout_seconds, NEXT_PROMPT_TIMEOUT_SECONDS)):
+            service = await _get_service()
+            question = _question_text(text)
+            previous_questions = [_question_text(turn["question"]) for turn in history]
+            previous_suggestions = [turn["nextPrompt"] for turn in history if "nextPrompt" in turn]
+            suggestion = await service.client.next_prompt(
+                question, answer, hex_context(text, history), previous_questions, previous_suggestions
+            )
+            return _validated_next_prompt(
+                suggestion, [question, *previous_questions, *previous_suggestions]
+            )
+    except Exception as exc:
+        # Cancellation still propagates, including when the socket disconnects.
+        logger.info("Chat next-prompt generation skipped (%s)", type(exc).__name__)
+        return None
