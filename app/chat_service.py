@@ -25,6 +25,11 @@ PROJECT_QUESTION = re.compile(
     r"для чого (?:потрібен|створений))\s+(?:про[єе]кт\s+)?(?:okil|окіл)[.?!]*",
     re.IGNORECASE,
 )
+PROJECT_CATEGORIES_QUESTION = re.compile(
+    r"\A(?:які(?:\s+саме)?|що за|назви|перелічи|поясни|розкажи про)\s+"
+    r"(?:категор\w*|критері\w*)\b[^?!.]*\b(?:okil|окіл)[.?!]*\Z",
+    re.IGNORECASE,
+)
 SCORE_QUESTION = re.compile(
     r"\A(?:поясни|поясніть|чому|яка|який|що означає|розкажи)\b.*"
     r"\b(?:оцінк\w*|рейтинг\w*|бал\w*)\b", re.IGNORECASE
@@ -88,26 +93,50 @@ class ChatAIService:
         self.score_intent = score_intent
 
     def _explicit_intent(self, question: str):
-        if self.project_intent is not None and PROJECT_QUESTION.fullmatch(question.strip()):
+        question = question.strip()
+        if self.project_intent is not None and (
+            PROJECT_QUESTION.fullmatch(question)
+            or (
+                PROJECT_CATEGORIES_QUESTION.fullmatch(question)
+                and not HEX_SCOPE.search(question)
+                and not H3_ID_PATTERN.search(question)
+            )
+        ):
             return self.project_intent
         if self.score_intent is not None and SCORE_QUESTION.search(question) and HEX_SCOPE.search(question):
             return self.score_intent
         return None
 
-    async def reply(self, text: str, history: Sequence[ChatTurn]) -> str:
-        # The map adds a context header, not extra questions. Never trust its
-        # supplied scores: answer_intent fetches the actual facts from the DB.
-        match = UI_CONTEXT_PREFIX.fullmatch(text)
-        question = match.group("question") if match else text
-        parsed = await self.classifier.parse_query(question)
-        # Short, explicit product FAQs can be misclassified as POI by #69.
-        # Correct only full FAQ fragments, never arbitrary appended instructions.
+    def _resolved_parts(self, parsed):
+        # Product FAQs can be misclassified as POI/score by the embedding model.
+        # Apply identical corrections to answers and candidate follow-up questions.
         parts = [
             (part.text, self._explicit_intent(part.text) or part.match.intent)
             for part in parsed.relevant_parts
         ]
         parts.extend((part, intent) for part in parsed.unrelated_parts
                      if (intent := self._explicit_intent(part)) is not None)
+        return parts
+
+    async def supports_next_prompt(self, question: str, cell: str | None) -> bool:
+        suggested_cells = {match.lower() for match in H3_ID_PATTERN.findall(question)}
+        if suggested_cells and suggested_cells != {cell}:
+            return False
+        parsed = await self.classifier.parse_query(question)
+        if any(self._explicit_intent(part) is None for part in parsed.unrelated_parts):
+            return False
+        parts = self._resolved_parts(parsed)
+        return bool(parts) and all(
+            intent is not None and (cell is not None or intent.value not in {"poi", "hex_score"})
+            for _, intent in parts
+        )
+
+    async def reply(self, text: str, history: Sequence[ChatTurn]) -> str:
+        # The map adds a context header, not extra questions. Never trust its
+        # supplied scores: answer_intent fetches the actual facts from the DB.
+        question = _question_text(text)
+        parsed = await self.classifier.parse_query(question)
+        parts = self._resolved_parts(parsed)
         if not parts:
             return UNRELATED_REPLY
 
@@ -233,12 +262,16 @@ async def generate_next_prompt(
             question = _question_text(text)
             previous_questions = [_question_text(turn["question"]) for turn in history]
             previous_suggestions = [turn["nextPrompt"] for turn in history if "nextPrompt" in turn]
+            cell = hex_context(text, history)
             suggestion = await service.client.next_prompt(
-                question, answer, hex_context(text, history), previous_questions, previous_suggestions
+                question, answer, cell, previous_questions, previous_suggestions
             )
-            return _validated_next_prompt(
+            suggestion = _validated_next_prompt(
                 suggestion, [question, *previous_questions, *previous_suggestions]
             )
+            if suggestion is None or not await service.supports_next_prompt(suggestion, cell):
+                return None
+            return suggestion
     except Exception as exc:
         # Cancellation still propagates, including when the socket disconnects.
         logger.info("Chat next-prompt generation skipped (%s)", type(exc).__name__)

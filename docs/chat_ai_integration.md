@@ -123,6 +123,15 @@ saved questions/suggestions are rejected after case, punctuation and whitespace
 normalization. Semantic relevance and paraphrase avoidance rely on the model.
 When omitted, `nextPrompt` is absent rather than an empty string or JSON object.
 
+Before returning a suggestion, the adapter checks it with the same classifier
+and routing corrections used for normal questions. It omits unrecognized
+questions, POI/score questions without H3 context, and model-invented H3 IDs.
+General questions such as `Які категорії оцінює OKIL?` and
+`Які критерії ... в OKIL?` use the project-information service rather than
+requiring a selected cell. This correction excludes questions referring to a
+specific cell or asking for places. The classifier model and supported intent
+types are unchanged.
+
 The optional step has a three-second timeout, further limited by whatever
 remains of the existing 30-second generation budget. A timeout, provider error,
 invalid JSON or rejected suggestion returns the ready main answer without the
@@ -171,6 +180,47 @@ exercise the adapter contract without downloading models or using credentials.
 Next-prompt checks cover contextual output, omission, repeated/malformed output,
 provider failure, deadline exhaustion, persistence, reconnect and duplicate
 requests. These checks mock Groq and do not measure live suggestion quality.
+
+### Live verification of #86 (2026-11-15)
+
+The final changes pass 110 AI/chat tests, including regressions for generated
+project questions being misclassified as cell-score requests and for omitting
+suggestions that cannot be processed with the available context.
+
+A separate live check used the actual `main:app` over a localhost WebSocket,
+Groq `openai/gpt-oss-20b`, the real multilingual Sentence Transformers classifier,
+Redis 7.0.15 in WSL and PostgreSQL. Database sessions were explicitly read-only;
+startup schema initialization was disabled. Only the test's own anonymous
+Redis session was removed afterward.
+
+- A project question returned an answer and a plain-text follow-up about the
+  health category's criteria. Sending that generated question back to the chat
+  succeeded without an H3 ID and returned the actual catalog radii.
+- A score question for `891e7689e8fffff` returned its main answer with no
+  suggestion, exercising the optional-field path.
+- Reconnecting restored all three completed turns, including their suggestions.
+- Replaying the original request returned the identical completed event, with
+  no extra main-answer or suggestion provider calls.
+- Separate direct Groq checks returned contextual suggestions in under
+  1.4 seconds and `null` for a user who explicitly ended the conversation.
+
+This verifies the backend protocol and real providers; frontend rendering is
+outside #86. Failure, timeout and disconnect cases are covered by automated
+tests with controlled failures, rather than by disrupting the live providers.
+
+The local `.env` uses the following non-secret startup settings:
+
+```dotenv
+DB_INIT_ON_STARTUP=false
+CHAT_PRELOAD_AI=true
+REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+For an existing Ubuntu/WSL Redis installation, start it with
+`wsl -d Ubuntu -u root -- service redis-server start`. The first model download
+and load took about 38 seconds, so preload keeps this outside the reply budget.
+Install `requirements.txt` into the same environment used to run Uvicorn;
+both `sentence-transformers` and `websockets` must be installed for the live flow.
 
 Controlled integration also used the unchanged service/classifier modules from
 PR #69 and the unchanged React `Chat.tsx` from PR #95. The actual component was

@@ -186,7 +186,10 @@ The completed event can also include a contextual follow-up question:
 The backend generates it through the configured Groq model after the main
 answer, using at most 3 seconds of the remaining 30-second reply budget.
 Provider errors, invalid output and suggestion timeouts still deliver the main
-answer. The suggestion is stored with the turn and reused for duplicate requests.
+answer. Suggestions are checked against the chat's classifier and available H3
+context, so an unusable follow-up is omitted. General OKIL category/criteria
+questions work without a selected cell. The suggestion is stored with the turn
+and reused for duplicate requests.
 Existing clients can keep using `text`; displaying or sending the suggestion is
 a separate frontend change. See [next-prompt behavior](docs/chat_ai_integration.md#contextual-next-prompts-86)
 for context limits and validation.

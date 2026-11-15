@@ -296,7 +296,9 @@ def test_failure_after_generation_started_does_not_retry_provider():
 @pytest.fixture
 def next_prompt_client(monkeypatch):
     client = SimpleNamespace(next_prompt=AsyncMock(return_value="Які місця є в цій ділянці?"))
-    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=SimpleNamespace(client=client)))
+    service, _, _ = backend([part("Які місця є в цій ділянці?", Intent.POI)])
+    service.client = client
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=service))
     return client
 
 
@@ -377,3 +379,66 @@ def test_next_prompt_cancellation_is_not_swallowed(next_prompt_client):
             await task
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("question", [
+    "Які категорії оцінює OKIL?",
+    "Які саме категорії оцінювання доступності показує OKIL?",
+    "Які критерії використовуються для оцінки категорії «Здоров’я» у проєкті OKIL?",
+    "Поясни категорії оцінювання в Окіл",
+])
+def test_generated_project_category_question_can_be_answered_without_hex(question, monkeypatch):
+    service, answer, db = backend([part(question.rstrip("?"), Intent.SCORE)])
+    service.project_intent = Intent.PROJECT
+    service.client = SimpleNamespace(next_prompt=AsyncMock(return_value=question))
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=service))
+
+    suggestion = asyncio.run(chat_service.generate_next_prompt("Що таке OKIL?", "Опис проєкту", []))
+    assert suggestion == question
+    assert asyncio.run(service.reply(suggestion, [turn("Що таке OKIL?")])) == "Відповідь AI"
+    answer.assert_awaited_once_with(db, service.client, question.rstrip("?"), Intent.PROJECT, None)
+
+
+@pytest.mark.parametrize("question", [
+    "Які категорії знижують оцінку цієї ділянки в OKIL?",
+    f"Які категорії найслабші в {CELL} у OKIL?",
+    "Назви місця категорії Здоров’я в OKIL?",
+])
+def test_category_faq_correction_does_not_override_cell_or_place_questions(question):
+    service, _, _ = backend([])
+    service.project_intent = Intent.PROJECT
+    assert service._explicit_intent(question) is None
+
+
+@pytest.mark.parametrize("intent, cell, expected", [
+    (Intent.POI, None, None),
+    (Intent.SCORE, None, None),
+    (Intent.POI, CELL, "Які місця є в цій ділянці?"),
+])
+def test_next_prompt_requiring_missing_context_is_omitted(monkeypatch, intent, cell, expected):
+    suggestion = "Які місця є в цій ділянці?"
+    service, _, _ = backend([part(suggestion, intent)])
+    service.client = SimpleNamespace(next_prompt=AsyncMock(return_value=suggestion))
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=service))
+    history = [turn(cell)] if cell else []
+    assert asyncio.run(chat_service.generate_next_prompt("OKIL", "Опис", history)) == expected
+
+
+def test_unrelated_or_model_invented_hex_suggestion_is_omitted(monkeypatch):
+    service, _, _ = backend([])
+    service.classifier.parse_query.return_value.unrelated_parts = ["Дай рецепт"]
+    service.client = SimpleNamespace(next_prompt=AsyncMock(return_value="Дай рецепт"))
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=service))
+    assert asyncio.run(chat_service.generate_next_prompt("OKIL", "Опис", [])) is None
+    service.client.next_prompt.return_value = f"Яка оцінка {OTHER_CELL}?"
+    service.classifier.parse_query.reset_mock()
+    assert asyncio.run(chat_service.generate_next_prompt("OKIL", "Опис", [turn(CELL)])) is None
+    service.classifier.parse_query.assert_not_awaited()
+
+
+def test_suggestion_classifier_failure_does_not_discard_main_answer(monkeypatch):
+    service, _, _ = backend([])
+    service.classifier.parse_query.side_effect = RuntimeError("classification failed")
+    service.client = SimpleNamespace(next_prompt=AsyncMock(return_value="Які категорії оцінює OKIL?"))
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=service))
+    assert asyncio.run(chat_service.generate_next_prompt("Що таке OKIL?", "Опис", [])) is None
