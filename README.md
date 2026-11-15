@@ -219,3 +219,15 @@ Debug authentication uses `POST /debug/session` with HTTP Basic credentials to i
 Keep credentials in backend hosting secrets, outside Git and frontend environment variables. HTTPS is required by default. For local development only, `DEBUG_ALLOW_LOCAL_HTTP=true` permits HTTP from loopback clients to localhost. Leave it false on shared deployments, terminate TLS at the hosting proxy, and trust forwarded headers only from that proxy.
 
 Sessions and login limits currently live in one backend process and reset when it restarts. Run one worker; multiple workers or instances require a shared session and rate-limit store first.
+
+
+Debugger mobility uses the same TravelTime service as `/hexagons`, including its default
+bus mode and Lviv centre anchor. Configure `TRAVELTIME_API_KEY` and `TRAVELTIME_APP_ID`
+on the backend. `/debug/ratings`, `/debug/hexagons/{id}` and `/debug/recalculate` accept
+`transportation`, repeated `anchor_lat`, `anchor_lon` and `weight` query parameters,
+matching the main API. Stored, fresh and temporary weighted results all use the current
+TravelTime mobility score; legacy database mobility and GTFS connectivity are not used
+for scoring. Stops remain inspectable map data but do not contribute to mobility.
+TravelTime configuration or request failures return explicit 503/502 errors. Ratings
+skip TravelTime when mobility is disabled; detail/recalculation still fetch it because
+they include baseline scores with all default categories enabled. No scores are saved.

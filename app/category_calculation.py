@@ -1,8 +1,7 @@
-import math
 from collections import defaultdict
 
 from geoalchemy2 import Geometry
-from sqlalchemy import String, Float, cast, select, func
+from sqlalchemy import String, cast, select, func
 
 from app.models import HexTable, Point, PointType, Stop, StopRouteConnectable
 from app.scoring import SYSTEM_WEIGHTS
@@ -43,9 +42,7 @@ async def load_inputs(session):
 
 async def load_hexes(session, ids=None):
     geom = HexTable.geom.cast(Geometry)
-    # Main now computes mobility externally. Older databases may still carry its stored score.
-    legacy_mobility = func.coalesce(cast(func.to_jsonb(HexTable.__table__.table_valued()).op("->>")("mobility"), Float), 0).label("mobility")
-    columns = [getattr(HexTable, name) if name != "mobility" else legacy_mobility for name in SYSTEM_WEIGHTS]
+    columns = [getattr(HexTable, name) for name in SYSTEM_WEIGHTS if name != "mobility"]
     query = select(cast(HexTable.h3_id, String).label("h3_id"), geom.ST_Y().label("lat"), geom.ST_X().label("lon"), *columns)
     if ids is not None:
         query = query.where(cast(HexTable.h3_id, String).in_(ids))
@@ -64,30 +61,13 @@ def components(cell, inputs):
         return get_distance_meters(cell["lat"], cell["lon"], point["lat"], point["lon"])
     steps = []
     for category, names in groups.items():
+        if category == "mobility":
+            continue  # TravelTime supplies this category; POIs and GTFS do not score it.
         for name in names:
-            transit = category == "mobility" and name == "gtfs_stop"
             conf = types.get(name)
             radii = effective_radii(name, category, conf)
             step = dict(category=category, type=name, radii=radii, score=0, used=[])
-            if transit:
-                ranked = [(distance(p), p) for p in stops]
-                candidates = [(d,p) for d,p in ranked if d <= radii[2]]
-                penalty = 1.0
-                if ranked and not candidates:
-                    candidates = [min(ranked, key=lambda pair: pair[0])]
-                    penalty = 0.3
-                reachable = {}
-                for d, point in candidates:
-                    w = calculate_distance_score(d, *radii) / 100
-                    links = routes[point["id"]]
-                    step["used"].append(dict(id=point["id"], kind="stop", distance=d, routes=links, weight=w))
-                    for route in links:
-                        for dest in destinations[route] - {point["id"]}:
-                            reachable[dest] = max(reachable.get(dest, 0), w)
-                raw = sum(reachable.values()) * penalty
-                step.update(score=min(100, 100 * (math.log1p(raw) / math.log(20))),
-                            penalty=penalty, destinations=reachable, network_score=raw)
-            elif by_type[name]:
+            if by_type[name]:
                 nearest = sorted(by_type[name], key=distance)[:TOP_N_POINTS]
                 scores = [calculate_distance_score(distance(point), *radii) for point in nearest]
                 step.update(score=sum(scores) / len(scores),

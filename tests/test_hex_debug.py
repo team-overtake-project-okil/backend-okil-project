@@ -2,6 +2,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 import pytest
+import httpx
 from fastapi import FastAPI, Depends
 from fastapi.testclient import TestClient
 
@@ -24,10 +25,9 @@ def test_missing_type_and_remote_transit_explain_baseline_and_experiment():
     types = {"cafe": SimpleNamespace(radius_of_influence_1=100, radius_of_influence_2=200,
                                      radius_of_influence_3=300)}
     inputs = types, {"food": ["cafe", "missing"], "mobility": ["gtfs_stop"]}, [], defaultdict(list,cafe=[cafe]), [stop], {8:[1]}, {1:{8,9}}
-    cell = {"lat":49.84,"lon":24.03,"h3_id":"test","food":75}
+    cell = {"lat":49.84,"lon":24.03,"h3_id":"test","food":75,"mobility":80}
     steps = components(cell, inputs)
-    assert steps[-1]["penalty"] == 0.3
-    assert set(steps[-1]["destinations"]) == {9}
+    assert all(step["category"] != "mobility" for step in steps)
     assert aggregate(steps,{})[0]["food"] == 50
     assert aggregate(steps,{"cafe":0,"missing":0})[0]["food"] == 0
     result = evaluate(cell, inputs, Experiment(ids=["test"],types={"cafe":3}), True)
@@ -165,3 +165,67 @@ def test_debugger_uses_the_same_three_nearest_pois_as_main():
     assert [point["id"] for point in steps[0]["used"]] == [0, 1, 2]
     assert steps[0]["score"] == pytest.approx(calculate_top_n_score(49.84, 24.03, points, 100, 200, 300))
     assert sum(point["score"] / 3 for point in steps[0]["used"]) == pytest.approx(steps[0]["score"])
+
+
+@pytest.fixture
+def mobility_client(monkeypatch):
+    from unittest.mock import AsyncMock
+    import routers.debug as debug
+    from app.database import get_async_db
+    from app.scoring import SYSTEM_WEIGHTS
+    client = login_test_client(monkeypatch)
+    client.app.dependency_overrides[get_async_db] = lambda: None
+    cell = {"h3_id": "891e7688377ffff", "lat": 49.84, "lon": 24.03,
+            **dict.fromkeys(SYSTEM_WEIGHTS, 100), "mobility": 0}
+    monkeypatch.setattr(debug, "load_hexes", AsyncMock(return_value=[cell]))
+    monkeypatch.setattr(debug, "load_inputs", AsyncMock(return_value=(
+        {}, {}, [], defaultdict(list), [], {}, {})))
+    monkeypatch.setattr(debug, "components", lambda cell, inputs: [])
+    monkeypatch.setattr(debug, "aggregate", lambda steps, weights: (
+        dict.fromkeys(SYSTEM_WEIGHTS, 100) | {"mobility": 0}, []))
+    service = AsyncMock(return_value={cell["h3_id"]: 80})
+    monkeypatch.setattr(debug, "get_mobility_scores", service)
+    token = client.post("/debug/session", auth=("team", "example")).json()["token"]
+    client.headers["Authorization"] = "Bearer " + token
+    return client, service, cell["h3_id"]
+
+
+def test_debug_map_and_details_use_current_traveltime(mobility_client):
+    client, service, cell_id = mobility_client
+    response = client.get("/debug/ratings")
+    assert response.status_code == 200
+    assert response.json()[0]["overall_rating"] == 98
+    assert response.json()[0]["category_scores"]["mobility"] == 80
+    for response in (client.get(f"/debug/hexagons/{cell_id}"),
+                     client.post("/debug/recalculate", json={"ids": [cell_id], "selected": cell_id})):
+        assert response.status_code == 200
+        body = response.json()
+        body = body[0] if isinstance(body, list) else body
+        for mode in ("stored", "fresh", "experiment"):
+            assert body[mode] == 98
+            assert body["category_scores"][mode]["mobility"] == 80
+    assert service.await_count == 3
+
+
+def test_debug_mobility_options_and_disabled_category(mobility_client):
+    client, service, cell_id = mobility_client
+    response = client.get("/debug/ratings", params={
+        "transportation": "car", "anchor_lat": 49.84, "anchor_lon": 24.03, "weight": 2})
+    assert response.status_code == 200
+    service.assert_awaited_once_with([cell_id], "car", [(49.84, 24.03, 2.0)])
+    service.reset_mock()
+    response = client.get("/debug/ratings", params={"weight_mobility": 0})
+    assert response.status_code == 200
+    assert response.json()[0]["overall_rating"] == 100
+    service.assert_not_awaited()
+    assert client.get("/debug/ratings?anchor_lat=49.84").status_code == 400
+
+
+@pytest.mark.parametrize("error,status", [(RuntimeError("Missing credentials"), 503),
+                                         (ValueError("Invalid mode"), 400),
+                                         (httpx.ConnectError("Unavailable"), 502)])
+def test_debug_traveltime_failure_is_explicit(mobility_client, error, status):
+    client, service, cell_id = mobility_client
+    service.side_effect = error
+    assert client.get("/debug/ratings").status_code == status
+    assert client.get(f"/debug/hexagons/{cell_id}").status_code == status

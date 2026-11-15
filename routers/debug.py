@@ -5,12 +5,14 @@ from threading import Lock
 from typing import Annotated, Literal
 
 import h3
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, Request
 from fastapi.security import HTTPBasic, HTTPBasicCredentials, HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, FiniteFloat
 from starlette.concurrency import run_in_threadpool
 
 from app.category_calculation import aggregate, components, load_inputs, load_hexes, get_distance_meters
+from app.mobility_score_service import get_mobility_scores
 from app.config import settings
 from app.database import get_async_db
 from app.scoring import SYSTEM_WEIGHTS, calculate_category_ratings, calculate_overall_rating
@@ -188,9 +190,41 @@ async def config(db=Depends(get_async_db)):
             "batch_limit": 200, "default_weight": 1, "weight_range": [0, 5]}
 
 
+def mobility_options(
+    transportation: str = Query(default="bus"),
+    anchor_lat: list[float] | None = Query(default=None),
+    anchor_lon: list[float] | None = Query(default=None),
+    weight: list[float] | None = Query(default=None),
+):
+    anchors = None
+    if anchor_lat is not None or anchor_lon is not None or weight is not None:
+        if not anchor_lat or not anchor_lon or len(anchor_lat) != len(anchor_lon):
+            raise HTTPException(400, "anchor_lat and anchor_lon must match")
+        anchor_weights = weight or [1.0] * len(anchor_lat)
+        if len(anchor_weights) != len(anchor_lat):
+            raise HTTPException(400, "Provide one weight per anchor")
+        anchors = list(zip(anchor_lat, anchor_lon, anchor_weights))
+    return transportation, anchors
+
+
+async def current_mobility(cells, options, enabled=True):
+    scores = {}
+    if enabled:
+        try:
+            scores = await get_mobility_scores([c["h3_id"] for c in cells], *options)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "TravelTime API request failed") from exc
+    return [dict(cell, mobility=scores.get(cell["h3_id"], 0.0)) for cell in cells]
+
+
 @protected_router.get("/ratings")
-async def ratings(weights: Annotated[HexagonWeights, Query()], db=Depends(get_async_db)):
-    cells = await load_hexes(db)
+async def ratings(weights: Annotated[HexagonWeights, Query()], db=Depends(get_async_db),
+                  options=Depends(mobility_options)):
+    cells = await current_mobility(await load_hexes(db), options, weights.mobility > 0)
     return [dict(h3_id=cell["h3_id"], overall_rating=calculate_overall_rating(cell, weights.model_dump()),
                  category_scores={key: cell[key] or 0 for key in SYSTEM_WEIGHTS}) for cell in cells]
 
@@ -204,6 +238,7 @@ def evaluate(cell, inputs, request, detail):
     steps = components(cell, inputs)
     fresh, baseline = aggregate(steps, {})
     experiment, trace = aggregate(steps, request.types)
+    fresh["mobility"] = experiment["mobility"] = cell["mobility"]
     weights = defaults | request.categories
     result = {"h3_id": cell["h3_id"], "stored": calculate_overall_rating(cell, defaults),
               "fresh": calculate_overall_rating(fresh, defaults),
@@ -220,12 +255,13 @@ def evaluate(cell, inputs, request, detail):
 
 
 @protected_router.post("/recalculate")
-async def recalculate(request: Experiment, db=Depends(get_async_db)):
+async def recalculate(request: Experiment, db=Depends(get_async_db), options=Depends(mobility_options)):
     for cell_id in request.ids:
         check_id(cell_id)
     cells = await load_hexes(db, request.ids)
     if len(cells) != len(set(request.ids)):
         raise HTTPException(404, "Unknown cell")
+    cells = await current_mobility(cells, options)
     inputs = await load_inputs(db)
     if request.types.keys() - (set(inputs[0]) | {"gtfs_stop"}) or request.categories.keys() - defaults.keys():
         raise HTTPException(422, "Unknown weight")
@@ -233,8 +269,8 @@ async def recalculate(request: Experiment, db=Depends(get_async_db)):
 
 
 @protected_router.get("/hexagons/{cell_id}")
-async def detail(cell_id: str, db=Depends(get_async_db)):
-    return (await recalculate(Experiment(ids=[cell_id], selected=cell_id), db))[0]
+async def detail(cell_id: str, db=Depends(get_async_db), options=Depends(mobility_options)):
+    return (await recalculate(Experiment(ids=[cell_id], selected=cell_id), db, options))[0]
 
 
 @protected_router.get("/hexagons/{cell_id}/points")
