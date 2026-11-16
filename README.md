@@ -8,6 +8,13 @@ After downloading and opening in code redactor
 
 For mobility scoring and routes, add your provider credentials to `.env`:
 
+For local development without TravelTime/HERE keys, set
+`EXTERNAL_TRANSPORT_ENABLED=false` in `.env` and restart the backend. Hexagon
+endpoints then skip both providers, exclude mobility from the overall rating
+and mark that category disabled, and return an empty `routes` list. Other
+categories continue to use database scores. The default is `true`; restore it
+after adding the credentials. This setting does not disable the AI provider.
+
 ```dotenv
 TRAVELTIME_APP_ID=your-traveltime-application-id
 TRAVELTIME_API_KEY=your-traveltime-api-key
@@ -60,11 +67,40 @@ This checks connectivity only; application GET endpoints are implemented separat
 
 ## AI knowledge vectors
 
-The `ai_knowledge` table stores text fragments and their 1536-dimensional
+[Окіл: база знань про механіку](docs/ai_context.md) contains standalone Ukrainian
+retrieval sections with stable IDs, sample questions, factual answers and source
+metadata. Export them to UTF-8 JSONL without calling a model or writing to the DB:
+
+```powershell
+python -m app.export_ai_knowledge --output okil_knowledge.jsonl
+```
+
+See [ingestion instructions](docs/ai_knowledge_ingestion.md) for the record format,
+embedding dimensions and the remaining retrieval integration.
+
+The `ai_knowledge` table stores text fragments and their 384-dimensional
 embeddings in PostgreSQL with pgvector. It is intended for searchable reference
 content about the project. Its `category` column is an optional topic label; it
 does not classify user questions. `metadata` is JSONB for optional source and
-future fields. Embeddings stored in this table must have 1536 dimensions.
+future fields. Embeddings stored in this table must have 384 dimensions, generated
+with `paraphrase-multilingual-MiniLM-L12-v2` for both documents and search queries.
+
+For existing databases, verify that the embedding column is `vector(384)`
+through a write-enabled database connection before importing vectors.
+`create_all` does not alter an existing column. Regenerate incompatible existing
+vectors from their source texts rather than truncating or padding them.
+
+Import Markdown directly with local MiniLM embeddings using the configured
+`DB_URL` from `.env`:
+
+```powershell
+python -m app.import_ai_knowledge --validate-only
+python -m app.import_ai_knowledge --apply
+```
+
+Without `--apply`, the importer only creates embeddings and does not connect to
+the DB. Repeated imports update existing document/chunk IDs without duplicates;
+unrelated records and removed topics are not deleted automatically.
 
 The API enables the PostgreSQL `vector` extension at startup, so the database
 server must have pgvector installed.
@@ -85,8 +121,15 @@ print(match.intent, match.similarity)
 ```
 
 The model produces 384-dimensional embeddings for intent classification.
-These are separate from the 1536-dimensional `ai_knowledge` table embeddings;
-do not insert classifier embeddings into that table.
+The `ai_knowledge` table uses the same 384-dimensional model for document and
+search-query embeddings. Intent centroids describe request topics, not knowledge
+fragments; generate a separate embedding for each document fragment.
+
+`INTENT_DESCRIPTIONS` contains short, positive scenarios for each intent. At
+initialization each scenario is encoded separately, normalized, and averaged into
+one intent vector so later scenarios are not lost by encoding a long description
+as a single input. Existing cosine scoring and the `0.2` threshold are preserved.
+See [intent boundaries and evaluation cases](docs/intent_classification.md).
 
 To try the classifier interactively from the repository root, run:
 
@@ -130,6 +173,36 @@ Parts scoring below `0.2` are reported as unrelated; pass another
 Similarity scores are not probabilities. On Windows, press Ctrl+Z and Enter
 (or Ctrl+C) to exit.
 ## AI chat WebSocket (#60)
+
+### Clearing a conversation (#83)
+
+After `session.ready`, a client can clear its current session on the same socket:
+
+```json
+{"type":"session.clear","requestId":"clear_1","sessionToken":"<current-token>"}
+```
+
+Both a valid `requestId` and a valid token matching the socket's opened session
+are required. The reply is
+`{"type":"session.cleared","requestId":"clear_1","deleted":true}`.
+`deleted:false` also confirms success: the key had already expired or was
+deleted by another connection. Malformed requests, a token different from the
+opened session and storage failures use the existing `error` envelope with the
+clear request's `requestId`. A request without a valid ID has `requestId:null`.
+
+Only the hashed Redis key for this token is deleted, atomically, including its
+history and pending reply claim. The database is never flushed. The socket's
+own reply task is cancelled before acknowledgement. Other sockets cannot save
+an answer into the deleted key: their next operation returns `session_expired`.
+No immediate notification is broadcast to idle sockets. Concurrent Redis updates
+use WATCH and SET XX and cannot resurrect a deleted session.
+
+On acknowledgement the frontend removes its messages and old session token,
+then sends `session.open` without a token to start a new conversation. A storage
+error leaves the socket's binding intact so clearing can be retried. Clients must
+reconcile with the backend after a disconnect where the acknowledgement was lost.
+
+### Connecting and sending messages
 
 The chat uses Redis 6.0.9 or newer for anonymous sessions. To start a local Redis
 server with Docker, run this in a separate terminal:
@@ -177,7 +250,7 @@ The backend sends events for the same `requestId`:
 
 The chat adapter uses the AI classifier and `answer_intent` service from
 [PR #69](https://github.com/team-overtake-project-okil/backend-okil-project/pull/69).
-This branch includes the two unchanged AI modules from that PR; their Python
+The AI modules originate from that PR; their Python
 dependencies, intent model and `GROQ_API_KEY` must be configured. Until then the socket returns a
 readable `ai_unavailable` error; it never substitutes a test reply.
 See [chat AI integration](docs/chat_ai_integration.md) for setup, context,
