@@ -17,6 +17,29 @@ HERE_TRANSIT_COLORS = (
 )
 
 
+def _is_visible_route_color(color: object) -> bool:
+    if not isinstance(color, str) or len(color) != 7 or not color.startswith("#"):
+        return False
+    try:
+        red, green, blue = (
+            int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)
+        )
+    except ValueError:
+        return False
+
+    def linearize(channel: float) -> float:
+        if channel <= 0.04045:
+            return channel / 12.92
+        return ((channel + 0.055) / 1.055) ** 2.4
+
+    luminance = (
+        0.2126 * linearize(red)
+        + 0.7152 * linearize(green)
+        + 0.0722 * linearize(blue)
+    )
+    return luminance <= 0.65
+
+
 def hex_boundary_to_wkt(boundary) -> str:
     """
     boundary: [(lat, lng), ...], як повертає h3.cell_to_boundary().
@@ -131,12 +154,7 @@ def build_here_routes_geojson(routes: list[dict]) -> dict:
                 route_number = str(route_number).strip() or None
 
             color = transport.get("color")
-            if not (
-                isinstance(color, str)
-                and len(color) == 7
-                and color.startswith("#")
-                and all(char in "0123456789abcdefABCDEF" for char in color[1:])
-            ):
+            if not _is_visible_route_color(color):
                 if section_type == "pedestrian":
                     color = "#6B7280"
                 elif is_transit:

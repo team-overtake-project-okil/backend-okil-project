@@ -174,6 +174,43 @@ def test_bus_request_uses_public_transit_api(monkeypatch):
     assert "transportMode" not in params
 
 
+def test_faster_walking_route_replaces_transit_route(monkeypatch):
+    monkeypatch.setattr(service.settings, "HERE_ROUTING_API_KEY", "test-key")
+
+    class FasterWalkingClient(FakeHereClient):
+        async def get(self, url, *, params):
+            self.requests.append((url, params))
+            if url == here_routes.HERE_TRANSIT_URL:
+                return FakeResponse({"routes": [{
+                    "summary": {"duration": 1200},
+                    "sections": [{
+                        "type": "transit",
+                        "transport": {"mode": "bus", "name": "22"},
+                        "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+                    }],
+                }]})
+            return FakeResponse({"routes": [{
+                "summary": {"duration": 600},
+                "sections": [{
+                    "type": "pedestrian",
+                    "transport": {"mode": "pedestrian"},
+                    "polyline": "BFs94xJg5g1BsBgD",
+                }],
+            }]})
+
+    client = FasterWalkingClient()
+    monkeypatch.setattr(here_routes.httpx, "AsyncClient", lambda **kwargs: client)
+
+    result = asyncio.run(here_routes.get_here_routes("hex-a", (49.84, 24.03)))
+
+    features = result["routes"]["features"]
+    assert len(features) == 1
+    assert features[0]["properties"]["transport_mode"] == "walking"
+    assert features[0]["properties"]["section_type"] == "pedestrian"
+    assert client.requests[1][1]["transportMode"] == "pedestrian"
+    assert "modes" not in client.requests[1][1]
+
+
 def test_car_request_uses_here_routing_api(monkeypatch):
     monkeypatch.setattr(service.settings, "HERE_ROUTING_API_KEY", "test-key")
     client = FakeHereClient()

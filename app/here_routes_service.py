@@ -66,6 +66,23 @@ def _has_only_valid_transit_routes(route: dict[str, Any]) -> bool:
     return bool(transit_sections)
 
 
+def _route_duration_seconds(route: dict[str, Any]) -> float | None:
+    summary = route.get("summary")
+    if isinstance(summary, dict) and isinstance(summary.get("duration"), (int, float)):
+        return float(summary["duration"])
+
+    durations = []
+    for section in route.get("sections", []):
+        for key in ("travelSummary", "summary"):
+            section_summary = section.get(key)
+            if isinstance(section_summary, dict):
+                duration = section_summary.get("duration")
+                if isinstance(duration, (int, float)):
+                    durations.append(float(duration))
+                    break
+    return sum(durations) if durations else None
+
+
 async def get_here_routes(
     h3_id: str,
     origin: tuple[float, float],
@@ -92,6 +109,7 @@ async def get_here_routes(
             }
             if is_transit:
                 fallback_route = None
+                selected_route = None
                 for alternative_count in TRANSIT_ALTERNATIVE_COUNTS:
                     response = await client.get(
                         HERE_TRANSIT_URL,
@@ -117,11 +135,58 @@ async def get_here_routes(
                         None,
                     )
                     if preferred_route is not None:
-                        routes.append({"transport_mode": mode, **preferred_route})
+                        selected_route = preferred_route
                         break
                 else:
                     if fallback_route is not None:
-                        routes.append({"transport_mode": mode, **fallback_route})
+                        selected_route = fallback_route
+
+                if selected_route is not None:
+                    selected_duration = _route_duration_seconds(selected_route)
+                    walking_route = None
+                    if selected_duration is not None:
+                        walking_response = await client.get(
+                            HERE_ROUTING_URL,
+                            params={
+                                "apiKey": settings.HERE_ROUTING_API_KEY,
+                                "origin": base_params["origin"],
+                                "destination": base_params["destination"],
+                                "return": "polyline,summary,travelSummary",
+                                "transportMode": "pedestrian",
+                            },
+                        )
+                        walking_response.raise_for_status()
+                        walking_route = next(
+                            iter(walking_response.json().get("routes", [])), None
+                        )
+
+                    walking_duration = (
+                        _route_duration_seconds(walking_route)
+                        if walking_route is not None
+                        else None
+                    )
+                    if (
+                        walking_duration is not None
+                        and walking_duration < selected_duration
+                    ):
+                        walking_sections = []
+                        for section in walking_route.get("sections", []):
+                            transport = section.get("transport")
+                            walking_sections.append({
+                                **section,
+                                "type": "pedestrian",
+                                "transport": {
+                                    **(transport if isinstance(transport, dict) else {}),
+                                    "mode": "pedestrian",
+                                },
+                            })
+                        routes.append({
+                            "transport_mode": "walking",
+                            **walking_route,
+                            "sections": walking_sections,
+                        })
+                    else:
+                        routes.append({"transport_mode": mode, **selected_route})
             else:
                 response = await client.get(HERE_ROUTING_URL, params=base_params)
                 response.raise_for_status()

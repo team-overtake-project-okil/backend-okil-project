@@ -76,6 +76,21 @@ def test_here_transit_sections_get_distinct_fallback_colors():
     assert first["properties"]["color"] != second["properties"]["color"]
 
 
+def test_here_white_transit_color_uses_visible_fallback():
+    collection = build_here_routes_geojson([{
+        "transport_mode": "bus",
+        "sections": [{
+            "type": "transit",
+            "transport": {"mode": "bus", "name": "8", "color": "#FFFFFF"},
+            "polyline": "BFoz5xJ67i1B1B7PzIhaxL7Y",
+        }],
+    }])
+
+    color = collection["features"][0]["properties"]["color"]
+    assert color != "#FFFFFF"
+    assert color == "#2563EB"
+
+
 def test_one_stop_keeps_each_route_once():
     collection = build_hex_stops_geojson([
         {
