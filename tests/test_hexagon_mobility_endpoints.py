@@ -88,3 +88,38 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     hexagons.get_here_routes.assert_awaited_once_with(
         "hex-a", (49.84, 24.03), "bus", hexagons.LVIV_CENTER
     )
+
+
+def test_external_transport_can_be_disabled(monkeypatch):
+    client, db = _client(monkeypatch)
+    monkeypatch.setattr(hexagons.settings, "EXTERNAL_TRANSPORT_ENABLED", False)
+    hexagon = {
+        "h3_id": "hex-a", "health": 100, "study": 100, "daily": 100,
+        "sport": 100, "enjoyment": 100, "food": 100, "security": 100,
+    }
+    monkeypatch.setattr(hexagons, "fetch_hexagons", AsyncMock(return_value=[hexagon]))
+    monkeypatch.setattr(hexagons, "fetch_hexagon", AsyncMock(return_value=hexagon))
+    monkeypatch.setattr(hexagons, "get_mobility_scores", AsyncMock())
+    monkeypatch.setattr(
+        hexagons,
+        "fetch_hexagon_explanations",
+        AsyncMock(return_value={category: {"explanation": "ok"} for category in SYSTEM_WEIGHTS}),
+    )
+    monkeypatch.setattr(hexagons, "get_here_routes", AsyncMock())
+    params = {f"weight_{category}": 0 for category in SYSTEM_WEIGHTS if category != "mobility"}
+    params["weight_mobility"] = 1
+
+    list_response = client.get("/hexagons", params=params)
+    detail_response = client.get("/hexagons/hex-a", params=params)
+
+    assert list_response.status_code == 200
+    assert list_response.json() == [{"h3_id": "hex-a", "overall_rating": 0}]
+    assert detail_response.status_code == 200
+    assert detail_response.json()["routes"] == {"type": "FeatureCollection", "features": []}
+    assert next(
+        item for item in detail_response.json()["categories"]
+        if item["category"] == "mobility"
+    )["score"] == 0
+    hexagons.get_mobility_scores.assert_not_awaited()
+    hexagons.get_here_routes.assert_not_awaited()
+    db.execute.assert_not_awaited()
