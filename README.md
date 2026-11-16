@@ -8,7 +8,7 @@ After downloading and opening in code redactor
 
 For mobility scoring and routes, add your provider credentials to `.env`:
 
-For local development without TravelTime/HERE keys, set
+For local development without TravelTime credentials, set
 `EXTERNAL_TRANSPORT_ENABLED=false` in `.env` and restart the backend. Hexagon
 endpoints then skip both providers, exclude mobility from the overall rating
 and mark that category disabled, and return an empty `routes` list. Other
@@ -18,15 +18,11 @@ after adding the credentials. This setting does not disable the AI provider.
 ```dotenv
 TRAVELTIME_APP_ID=your-traveltime-application-id
 TRAVELTIME_API_KEY=your-traveltime-api-key
-HERE_ROUTING_API_KEY=your-here-api-key
 ```
 
-Get the first two values from your TravelTime API account and the HERE key from
-your HERE developer project, with both HERE Routing and Public Transit API v8
-enabled for the key. HERE car details use Routing API; bus details use Public
-Transit API routes, and no road-bus route is substituted when transit returns no
-route. If HERE has no bus route for the requested trip, no bus route is included
-in the `routes` array. TravelTime full-score thresholds default to 30 minutes
+Get both values from your TravelTime API account. TravelTime Routes API returns
+route parts used to build the `routes` GeoJSON collection. If a mode has no route,
+no feature for that mode is included. TravelTime full-score thresholds default to 30 minutes
 for bus and 20 minutes for car; `TRAVELTIME_TIME_CONSTANT_SECONDS` and
 `TRAVELTIME_MAX_SEARCH_SECONDS` are additional tuning settings shown in
 `.env.example`. Restart the backend after editing `.env`. Do not commit or

@@ -353,10 +353,11 @@ def test_hexagon_endpoints_include_and_apply_food(
     client, db, result = api
     from routers import hexagons
 
-    monkeypatch.setattr(hexagons.settings, "HERE_ROUTING_API_KEY", "test-key")
+    monkeypatch.setattr(hexagons.settings, "TRAVELTIME_API_KEY", "test-key")
+    monkeypatch.setattr(hexagons.settings, "TRAVELTIME_APP_ID", "test-app")
     monkeypatch.setattr(
         hexagons,
-        "get_here_routes",
+        "get_traveltime_routes",
         AsyncMock(return_value={
             "routes": {"type": "FeatureCollection", "features": []},
         }),

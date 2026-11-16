@@ -13,7 +13,6 @@ pgvector
 sentence-transformers
 asyncpg
 httpx
-flexpolyline
 h3>=4,<5
 shapely>=2,<3
 pandas

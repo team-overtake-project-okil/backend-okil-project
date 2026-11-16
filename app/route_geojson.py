@@ -3,11 +3,10 @@
 Тут лише чисті функції: без БД і без FastAPI, тому їх легко перевірити окремо.
 """
 import json
+import re
 from collections import defaultdict
 
-import flexpolyline
-
-HERE_TRANSIT_COLORS = (
+TRAVELTIME_TRANSIT_COLORS = (
     "#2563EB",
     "#DB2777",
     "#059669",
@@ -15,29 +14,26 @@ HERE_TRANSIT_COLORS = (
     "#7C3AED",
     "#0891B2",
 )
+_ROUTE_NUMBER = re.compile(r"(?<![A-Z0-9])(\d{1,3}[A-Z]?)(?![A-Z0-9])", re.IGNORECASE)
+_TRANSIT_NUMBER_IN_DIRECTIONS = re.compile(
+    r"(?:bus|tram|trolleybus|minibus|marshrutka)\s+(\d{1,3}[A-Z]?)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
 
 
-def _is_visible_route_color(color: object) -> bool:
-    if not isinstance(color, str) or len(color) != 7 or not color.startswith("#"):
-        return False
-    try:
-        red, green, blue = (
-            int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)
-        )
-    except ValueError:
-        return False
-
-    def linearize(channel: float) -> float:
-        if channel <= 0.04045:
-            return channel / 12.92
-        return ((channel + 0.055) / 1.055) ** 2.4
-
-    luminance = (
-        0.2126 * linearize(red)
-        + 0.7152 * linearize(green)
-        + 0.0722 * linearize(blue)
-    )
-    return luminance <= 0.65
+def _short_route_number(part: dict) -> str | None:
+    for key in ("line", "route_number", "route", "name"):
+        value = part.get(key)
+        if value is not None:
+            match = _ROUTE_NUMBER.search(str(value))
+            if match:
+                return match.group(1).upper()
+    directions = part.get("directions")
+    if isinstance(directions, str):
+        match = _TRANSIT_NUMBER_IN_DIRECTIONS.search(directions)
+        if match:
+            return match.group(1).upper()
+    return None
 
 
 def hex_boundary_to_wkt(boundary) -> str:
@@ -124,42 +120,39 @@ def build_hex_routes_geojson(routes: list, segment_rows: list, fallback_points: 
     return {"type": "FeatureCollection", "features": features}
 
 
-def build_here_routes_geojson(routes: list[dict]) -> dict:
-    """Convert HERE route sections into separately styled GeoJSON features."""
+def build_traveltime_routes_geojson(routes: list[dict]) -> dict:
+    """Convert TravelTime route parts into separately styled GeoJSON features."""
     features = []
     transit_section_index = 0
     for route_index, route in enumerate(routes):
-        for section_index, section in enumerate(route.get("sections", [])):
-            polyline = section.get("polyline")
-            if not polyline:
+        for section_index, section in enumerate(route.get("parts", [])):
+            points = section.get("coords") or []
+            if not points:
                 continue
-            points = flexpolyline.decode(polyline)
             coordinates = []
-            _extend(coordinates, [[point[1], point[0]] for point in points])
+            _extend(coordinates, [[point["lng"], point["lat"]] for point in points])
             if len(coordinates) < 2:
                 continue
 
             section_type = section.get("type", "unknown")
-            transport = section.get("transport")
-            if not isinstance(transport, dict):
-                transport = {}
-            mode = transport.get("mode") or section_type
-            is_transit = section_type == "transit"
-            route_number = (
-                transport.get("shortName")
-                or transport.get("routeNumber")
-                or transport.get("name")
-            )
-            if route_number is not None:
-                route_number = str(route_number).strip() or None
+            mode = section.get("mode") or section_type
+            is_transit = route.get("transport_mode") == "bus" and mode not in {
+                "walk", "walking", "unknown", "pedestrian"
+            }
+            route_number = _short_route_number(section) if is_transit else None
 
-            color = transport.get("color")
-            if not _is_visible_route_color(color):
-                if section_type == "pedestrian":
+            color = section.get("color")
+            if not (
+                isinstance(color, str)
+                and len(color) == 7
+                and color.startswith("#")
+                and all(char in "0123456789abcdefABCDEF" for char in color[1:])
+            ):
+                if mode in {"walk", "walking", "pedestrian"}:
                     color = "#6B7280"
                 elif is_transit:
-                    color = HERE_TRANSIT_COLORS[
-                        transit_section_index % len(HERE_TRANSIT_COLORS)
+                    color = TRAVELTIME_TRANSIT_COLORS[
+                        transit_section_index % len(TRAVELTIME_TRANSIT_COLORS)
                     ]
                 else:
                     color = "#2563EB"
@@ -171,14 +164,14 @@ def build_here_routes_geojson(routes: list[dict]) -> dict:
                 "route_index": route_index,
                 "section_index": section_index,
                 "color": color,
-                "line_style": "dashed" if section_type == "pedestrian" else "solid",
+                "line_style": "dashed" if mode in {"walk", "walking", "pedestrian"} else "solid",
             }
             if is_transit:
                 transit_section_index += 1
                 if route_number:
                     properties["route_number"] = route_number
                     properties["label"] = route_number
-                headsign = transport.get("headsign")
+                headsign = section.get("directions")
                 if isinstance(headsign, str) and headsign.strip():
                     properties["headsign"] = headsign.strip()
 

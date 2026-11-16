@@ -45,7 +45,8 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     result = Mock()
     result.mappings.return_value.first.return_value = {"lat": 49.84, "lon": 24.03}
     db.execute.return_value = result
-    monkeypatch.setattr(hexagons.settings, "HERE_ROUTING_API_KEY", "test-key")
+    monkeypatch.setattr(hexagons.settings, "TRAVELTIME_API_KEY", "test-key")
+    monkeypatch.setattr(hexagons.settings, "TRAVELTIME_APP_ID", "test-app")
     hexagon = {
         "h3_id": "hex-a", "health": 100, "study": 100, "daily": 100,
         "sport": 100, "enjoyment": 100, "food": 100, "security": 100,
@@ -59,7 +60,7 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     )
     monkeypatch.setattr(
         hexagons,
-        "get_here_routes",
+        "get_traveltime_routes",
         AsyncMock(return_value={
             "h3_id": "hex-a",
             "routes": {
@@ -87,7 +88,7 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     assert body["routes"]["features"][0]["properties"]["transport_mode"] == "bus"
     assert next(item for item in body["categories"] if item["category"] == "mobility")["score"] == 72
     assert {"h3_id", "overall_rating", "categories", "routes"} == set(body)
-    hexagons.get_here_routes.assert_awaited_once_with(
+    hexagons.get_traveltime_routes.assert_awaited_once_with(
         "hex-a", (49.84, 24.03), "bus", hexagons.LVIV_CENTER
     )
 
@@ -96,16 +97,15 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
 def test_local_mode_excludes_mobility_and_skips_both_providers(monkeypatch, path):
     client, _ = _client(monkeypatch)
     monkeypatch.setattr(hexagons.settings, "EXTERNAL_TRANSPORT_ENABLED", False)
-    monkeypatch.setattr(hexagons.settings, "HERE_ROUTING_API_KEY", "")
     monkeypatch.setattr(hexagons.settings, "TRAVELTIME_APP_ID", "")
     monkeypatch.setattr(hexagons.settings, "TRAVELTIME_API_KEY", "")
     row = {"h3_id": "hex-a", **{category: 100 for category in SYSTEM_WEIGHTS}}
     monkeypatch.setattr(hexagons, "fetch_hexagons", AsyncMock(return_value=[row]))
     monkeypatch.setattr(hexagons, "fetch_hexagon", AsyncMock(return_value=row))
     mobility = AsyncMock(side_effect=AssertionError("TravelTime must not be called"))
-    routes = AsyncMock(side_effect=AssertionError("HERE must not be called"))
+    routes = AsyncMock(side_effect=AssertionError("TravelTime must not be called"))
     monkeypatch.setattr(hexagons, "get_mobility_scores", mobility)
-    monkeypatch.setattr(hexagons, "get_here_routes", routes)
+    monkeypatch.setattr(hexagons, "get_traveltime_routes", routes)
     explanations = AsyncMock(return_value={
         category: {"explanation": "ok"} for category in SYSTEM_WEIGHTS
     })

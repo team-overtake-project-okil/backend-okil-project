@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
 from app.database import get_async_db
-from app.here_routes_service import HereRouteFormatError, get_here_routes
+from app.traveltime_routes_service import TravelTimeRouteFormatError, get_traveltime_routes
 from app.hexagon_repository import fetch_hexagon, fetch_hexagons
 from app.mobility_score_service import get_mobility_scores
 from app.mobility_transport import LVIV_CENTER
@@ -21,7 +21,7 @@ from app.scoring import calculate_category_ratings, calculate_overall_rating
 router = APIRouter(prefix="/hexagons", tags=["hexagons"])
 
 
-def _here_error_detail(error: httpx.HTTPStatusError) -> str:
+def _traveltime_error_detail(error: httpx.HTTPStatusError) -> str:
     try:
         body = error.response.json()
     except ValueError:
@@ -33,7 +33,7 @@ def _here_error_detail(error: httpx.HTTPStatusError) -> str:
         and isinstance(body.get(key), str)
         and body[key].strip()
     )
-    detail = f"HERE API returned HTTP {error.response.status_code}"
+    detail = f"TravelTime API returned HTTP {error.response.status_code}"
     return f"{detail}: {message[:300]}" if message else detail
 
 
@@ -124,11 +124,10 @@ async def get_hexagon(
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=502, detail="TravelTime API request failed") from exc
 
-    routes = {"type": "FeatureCollection", "features": []}
     routes = []
     if settings.EXTERNAL_TRANSPORT_ENABLED:
-        if not settings.HERE_ROUTING_API_KEY:
-            raise HTTPException(status_code=503, detail="HERE API is not configured")
+        if not settings.TRAVELTIME_API_KEY or not settings.TRAVELTIME_APP_ID:
+            raise HTTPException(status_code=503, detail="TravelTime API is not configured")
         result = await db.execute(
             select(
                 HexTable.geom.cast(Geometry).ST_Y().label("lat"),
@@ -139,19 +138,19 @@ async def get_hexagon(
         if row is None:
             raise HTTPException(status_code=404, detail="Hexagon not found")
         try:
-            route_result = await get_here_routes(
+            route_result = await get_traveltime_routes(
                 h3_id, (float(row["lat"]), float(row["lon"])), transportation, LVIV_CENTER
             )
-        except HereRouteFormatError as exc:
+        except TravelTimeRouteFormatError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=502, detail=_here_error_detail(exc)) from exc
+            raise HTTPException(status_code=502, detail=_traveltime_error_detail(exc)) from exc
         except httpx.HTTPError as exc:
             raise HTTPException(
                 status_code=502,
-                detail=f"HERE API request failed ({type(exc).__name__})",
+                detail=f"TravelTime API request failed ({type(exc).__name__})",
             ) from exc
         routes = route_result["routes"]
 
