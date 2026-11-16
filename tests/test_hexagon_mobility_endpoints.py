@@ -1,5 +1,7 @@
 from unittest.mock import AsyncMock, Mock
 
+import pytest
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -90,36 +92,39 @@ def test_detail_keeps_existing_fields_and_adds_routes_from_hex_center(monkeypatc
     )
 
 
-def test_external_transport_can_be_disabled(monkeypatch):
-    client, db = _client(monkeypatch)
+@pytest.mark.parametrize("path", ["/hexagons", "/hexagons/hex-a"])
+def test_local_mode_excludes_mobility_and_skips_both_providers(monkeypatch, path):
+    client, _ = _client(monkeypatch)
     monkeypatch.setattr(hexagons.settings, "EXTERNAL_TRANSPORT_ENABLED", False)
-    hexagon = {
-        "h3_id": "hex-a", "health": 100, "study": 100, "daily": 100,
-        "sport": 100, "enjoyment": 100, "food": 100, "security": 100,
-    }
-    monkeypatch.setattr(hexagons, "fetch_hexagons", AsyncMock(return_value=[hexagon]))
-    monkeypatch.setattr(hexagons, "fetch_hexagon", AsyncMock(return_value=hexagon))
-    monkeypatch.setattr(hexagons, "get_mobility_scores", AsyncMock())
-    monkeypatch.setattr(
-        hexagons,
-        "fetch_hexagon_explanations",
-        AsyncMock(return_value={category: {"explanation": "ok"} for category in SYSTEM_WEIGHTS}),
-    )
-    monkeypatch.setattr(hexagons, "get_here_routes", AsyncMock())
-    params = {f"weight_{category}": 0 for category in SYSTEM_WEIGHTS if category != "mobility"}
-    params["weight_mobility"] = 1
+    monkeypatch.setattr(hexagons.settings, "HERE_ROUTING_API_KEY", "")
+    monkeypatch.setattr(hexagons.settings, "TRAVELTIME_APP_ID", "")
+    monkeypatch.setattr(hexagons.settings, "TRAVELTIME_API_KEY", "")
+    row = {"h3_id": "hex-a", **{category: 100 for category in SYSTEM_WEIGHTS}}
+    monkeypatch.setattr(hexagons, "fetch_hexagons", AsyncMock(return_value=[row]))
+    monkeypatch.setattr(hexagons, "fetch_hexagon", AsyncMock(return_value=row))
+    mobility = AsyncMock(side_effect=AssertionError("TravelTime must not be called"))
+    routes = AsyncMock(side_effect=AssertionError("HERE must not be called"))
+    monkeypatch.setattr(hexagons, "get_mobility_scores", mobility)
+    monkeypatch.setattr(hexagons, "get_here_routes", routes)
+    explanations = AsyncMock(return_value={
+        category: {"explanation": "ok"} for category in SYSTEM_WEIGHTS
+    })
+    monkeypatch.setattr(hexagons, "fetch_hexagon_explanations", explanations)
 
-    list_response = client.get("/hexagons", params=params)
-    detail_response = client.get("/hexagons/hex-a", params=params)
+    # Even a positive explicit mobility weight cannot call disabled providers.
+    response = client.get(path, params={"weight_mobility": 5})
 
-    assert list_response.status_code == 200
-    assert list_response.json() == [{"h3_id": "hex-a", "overall_rating": 0}]
-    assert detail_response.status_code == 200
-    assert detail_response.json()["routes"] == {"type": "FeatureCollection", "features": []}
-    assert next(
-        item for item in detail_response.json()["categories"]
-        if item["category"] == "mobility"
-    )["score"] == 0
-    hexagons.get_mobility_scores.assert_not_awaited()
-    hexagons.get_here_routes.assert_not_awaited()
-    db.execute.assert_not_awaited()
+    assert response.status_code == 200
+    body = response.json()
+    if isinstance(body, list):
+        assert body == [{"h3_id": "hex-a", "overall_rating": 100}]
+    else:
+        assert body["overall_rating"] == 100
+        assert body["routes"] == []
+        rating = next(item for item in body["categories"] if item["category"] == "mobility")
+        assert rating["enabled"] is False
+        assert rating["weight"] == 0
+        assert rating["adjusted_score"] is None
+        assert explanations.await_args.args[2]["mobility"] == 0
+    mobility.assert_not_awaited()
+    routes.assert_not_awaited()

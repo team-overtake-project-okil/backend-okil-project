@@ -7,7 +7,7 @@ from contextlib import suppress
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from redis.exceptions import RedisError
 
-from app.chat_protocol import ChatProtocolError, parse_message, parse_question, parse_session_token
+from app.chat_protocol import ChatProtocolError, parse_message, parse_question, parse_request_id, parse_session_token
 from app.chat_service import ChatReplyError, REPLY_TIMEOUT_SECONDS, generate_reply
 from app.chat_sessions import ChatSessionError, ChatSessionStore
 from app.config import settings
@@ -93,6 +93,26 @@ async def chat_websocket(websocket: WebSocket) -> None:
             request_id = None
             try:
                 payload = parse_message(frame.get("text"))
+                if payload.get("type") == "session.clear":
+                    request_id = parse_request_id(payload)
+                    try:
+                        supplied_token = parse_session_token(payload.get("sessionToken"))
+                    except ChatProtocolError as exc:
+                        raise ChatSessionError(exc.code, str(exc)) from None
+                    if supplied_token is None:
+                        raise ChatSessionError("invalid_message", "Provide sessionToken.")
+                    if token is None or not secrets.compare_digest(token, supplied_token):
+                        raise ChatSessionError("session_required", "Open this session before clearing it.")
+                    deleted = await store.clear(supplied_token)
+                    token = None
+                    if reply_task:
+                        reply_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await reply_task
+                        reply_task = None
+                    await send({"type": "session.cleared", "requestId": request_id, "deleted": deleted})
+                    continue
+
                 if payload.get("type") == "session.open":
                     if reply_task and not reply_task.done():
                         raise ChatSessionError("busy", "A reply is already being prepared.")

@@ -39,7 +39,7 @@ def _here_error_detail(error: httpx.HTTPStatusError) -> str:
 
 @router.get("", response_model=list[HexagonRatingResponse])
 async def get_hexagons(
-    weights: Annotated[HexagonWeights, Query()],
+    weights: Annotated[HexagonWeights, Depends()],
     transportation: str = Query(default="bus"),
     anchor_lat: list[float] | None = Query(default=None),
     anchor_lon: list[float] | None = Query(default=None),
@@ -89,7 +89,7 @@ async def get_hexagons(
 @router.get("/{h3_id}", response_model=HexagonDetailResponse)
 async def get_hexagon(
     h3_id: str,
-    weights: Annotated[HexagonWeights, Query()],
+    weights: Annotated[HexagonWeights, Depends()],
     transportation: str = Query(default="bus"),
     anchor_lat: list[float] | None = Query(default=None),
     anchor_lon: list[float] | None = Query(default=None),
@@ -125,6 +125,7 @@ async def get_hexagon(
             raise HTTPException(status_code=502, detail="TravelTime API request failed") from exc
 
     routes = {"type": "FeatureCollection", "features": []}
+    routes = []
     if settings.EXTERNAL_TRANSPORT_ENABLED:
         if not settings.HERE_ROUTING_API_KEY:
             raise HTTPException(status_code=503, detail="HERE API is not configured")
