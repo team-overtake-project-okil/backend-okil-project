@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta
 import re
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -60,6 +61,34 @@ class TravelTimeRouteFormatError(RuntimeError):
     """Raised when TravelTime returns invalid route geometry."""
 
 
+def _route_departure_times() -> list[datetime]:
+    zone = ZoneInfo("Europe/Kyiv")
+    now = datetime.now(zone)
+    departures = []
+    for hour in (9, 14, 18):
+        departure = datetime.combine(now.date(), time(hour), zone)
+        if departure <= now:
+            departure += timedelta(days=1)
+        departures.append(departure)
+    return departures
+
+
+def _routes_from_response(payload: dict[str, Any]) -> list[tuple[dict[str, Any], float]]:
+    found = []
+    for result in payload.get("results", []):
+        for location in result.get("locations", []):
+            if location.get("id") != "destination":
+                continue
+            for prop in location.get("properties", []):
+                route = prop.get("route")
+                if isinstance(route, dict) and route.get("parts"):
+                    seconds = prop.get("travel_time", route.get("travel_time"))
+                    if not isinstance(seconds, (int, float)):
+                        seconds = float("inf")
+                    found.append((route, float(seconds)))
+    return found
+
+
 async def get_traveltime_routes(
     h3_id: str,
     origin: tuple[float, float],
@@ -69,59 +98,59 @@ async def get_traveltime_routes(
     if not settings.TRAVELTIME_API_KEY or not settings.TRAVELTIME_APP_ID:
         raise RuntimeError("TravelTime API credentials are not configured")
 
-    departure_time = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(timespec="seconds")
     headers = {
         "Content-Type": "application/json",
         "X-Application-Id": settings.TRAVELTIME_APP_ID,
         "X-Api-Key": settings.TRAVELTIME_API_KEY,
     }
     routes: list[dict[str, Any]] = []
+    scheduled_departures = _route_departure_times()
     async with httpx.AsyncClient(timeout=30.0) as client:
         for mode in mobility_modes(transportation):
             transport_type = "public_transport" if mode == "bus" else "driving"
-            departure_search = {
-                "id": f"route-{mode}",
-                "departure_location_id": "origin",
-                "arrival_location_ids": ["destination"],
-                "departure_time": departure_time,
-                "transportation": {"type": transport_type},
-                "properties": ["route"],
-            }
-            if mode == "bus":
-                # TravelTime can return up to five alternatives in a time window.
-                departure_search["range"] = {
-                    "enabled": True,
-                    "max_results": 5,
-                    "width": 1800,
-                }
-            payload = {
-                "locations": [
-                    {"id": "origin", "coords": {"lat": origin[0], "lng": origin[1]}},
-                    {"id": "destination", "coords": {"lat": destination[0], "lng": destination[1]}},
-                ],
-                "departure_searches": [departure_search],
-            }
-            response = await client.post(TRAVELTIME_ROUTES_URL, headers=headers, json=payload)
-            response.raise_for_status()
-            result = next(iter(response.json().get("results", [])), {})
-            fallback_route = None
-            valid_route = None
-            for location in result.get("locations", []):
-                if location.get("id") != "destination":
-                    continue
-                for prop in location.get("properties", []):
-                    route = prop.get("route")
-                    if isinstance(route, dict) and route.get("parts"):
-                        if fallback_route is None:
-                            fallback_route = route
-                        if mode != "bus" or _is_valid_transit_route(route):
-                            valid_route = route
-                            break
-                if valid_route is not None:
-                    break
-            chosen_route = valid_route or fallback_route
-            if chosen_route is not None:
-                routes.append({"transport_mode": mode, **chosen_route})
+            choices_for_schedule = []
+            for scheduled_departure in scheduled_departures:
+                first_route = None
+                chosen_route = None
+                retry_count = 5 if mode == "bus" else 0
+                for retry in range(retry_count + 1):
+                    departure_time = scheduled_departure + timedelta(minutes=15 * retry)
+                    departure_search = {
+                        "id": f"route-{mode}-{scheduled_departure.hour}-{retry}",
+                        "departure_location_id": "origin",
+                        "arrival_location_ids": ["destination"],
+                        "departure_time": departure_time.isoformat(timespec="seconds"),
+                        "transportation": {"type": transport_type},
+                        "properties": ["route", "travel_time"],
+                    }
+                    payload = {
+                        "locations": [
+                            {"id": "origin", "coords": {"lat": origin[0], "lng": origin[1]}},
+                            {"id": "destination", "coords": {"lat": destination[0], "lng": destination[1]}},
+                        ],
+                        "departure_searches": [departure_search],
+                    }
+                    response = await client.post(
+                        TRAVELTIME_ROUTES_URL, headers=headers, json=payload
+                    )
+                    response.raise_for_status()
+                    candidates = _routes_from_response(response.json())
+                    if candidates and first_route is None:
+                        first_route = candidates[0]
+                    valid_candidates = [
+                        candidate for candidate in candidates
+                        if mode != "bus" or _is_valid_transit_route(candidate[0])
+                    ]
+                    if valid_candidates:
+                        chosen_route = min(valid_candidates, key=lambda candidate: candidate[1])
+                        break
+                chosen_route = chosen_route or first_route
+                if chosen_route is not None:
+                    choices_for_schedule.append(chosen_route)
+
+            if choices_for_schedule:
+                route, seconds = min(choices_for_schedule, key=lambda candidate: candidate[1])
+                routes.append({"transport_mode": mode, "travel_time": seconds, **route})
 
     try:
         geojson = build_traveltime_routes_geojson(routes)

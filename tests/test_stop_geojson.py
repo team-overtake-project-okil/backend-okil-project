@@ -42,5 +42,19 @@ def test_transit_parts_get_distinct_fallback_colors_and_compact_numbers():
     assert first["properties"]["color"] != second["properties"]["color"]
 
 
+def test_traveltime_geojson_preserves_route_coordinate_precision():
+    collection = build_traveltime_routes_geojson([{
+        "transport_mode": "car",
+        "parts": [{"type": "road", "mode": "car", "coords": [
+            {"lat": 49.810001234, "lng": 24.020009876},
+            {"lat": 49.820001234, "lng": 24.030009876},
+        ]}],
+    }])
+
+    assert collection["features"][0]["geometry"]["coordinates"][0] == [
+        24.02000988, 49.81000123,
+    ]
+
+
 def test_empty_stop_rows_are_an_empty_collection():
     assert build_hex_stops_geojson([]) == {"type": "FeatureCollection", "features": []}

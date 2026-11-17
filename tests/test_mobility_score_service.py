@@ -135,13 +135,22 @@ def test_route_allowlist_respects_transit_kind():
     assert not route_service._is_valid_transit_route(route("bus", "80"))
 
 
-def test_bus_route_asks_for_alternatives_and_chooses_first_allowed_route(monkeypatch):
+def test_bus_route_retries_by_fifteen_minutes_and_chooses_fastest(monkeypatch):
     monkeypatch.setattr(service.settings, "TRAVELTIME_API_KEY", "key")
     monkeypatch.setattr(service.settings, "TRAVELTIME_APP_ID", "app")
+    monkeypatch.setattr(
+        route_service,
+        "_route_departure_times",
+        lambda: [
+            datetime(2026, 11, 17, hour, tzinfo=timezone.utc)
+            for hour in (9, 14, 18)
+        ],
+    )
 
-    class AlternativesClient:
+    class ScheduleClient:
         def __init__(self):
-            self.payload = None
+            self.departures = []
+            self.travel_times = (900, 800, 700, 1000)
 
         async def __aenter__(self):
             return self
@@ -150,20 +159,27 @@ def test_bus_route_asks_for_alternatives_and_chooses_first_allowed_route(monkeyp
             pass
 
         async def post(self, url, *, headers, json):
-            self.payload = json
-            invalid = {"parts": [{"type": "public_transport", "mode": "bus", "line": "Bus 80",
-                                  "coords": [{"lat": 49.8, "lng": 24.0}, {"lat": 49.81, "lng": 24.01}]}]}
-            valid = {"parts": [{"type": "public_transport", "mode": "bus", "line": "Bus 22 route",
-                                "coords": [{"lat": 49.8, "lng": 24.0}, {"lat": 49.81, "lng": 24.01}]}]}
+            search = json["departure_searches"][0]
+            self.departures.append(search["departure_time"])
+            call_index = len(self.departures) - 1
+            line = "Bus 80" if call_index == 0 else "Bus 22"
+            route = {"parts": [{
+                "type": "public_transport", "mode": "bus", "line": line,
+                "coords": [{"lat": 49.8, "lng": 24.0}, {"lat": 49.81, "lng": 24.01}],
+            }]}
             return FakeResponse({"results": [{"locations": [{"id": "destination", "properties": [
-                {"route": invalid}, {"route": valid},
+                {"route": route, "travel_time": self.travel_times[call_index]},
             ]}]}]})
 
-    client = AlternativesClient()
+    client = ScheduleClient()
     monkeypatch.setattr(route_service.httpx, "AsyncClient", lambda **kwargs: client)
 
     result = asyncio.run(route_service.get_traveltime_routes("hex-a", (49.84, 24.03)))
 
-    search = client.payload["departure_searches"][0]
-    assert search["range"] == {"enabled": True, "max_results": 5, "width": 1800}
+    assert len(client.departures) == 4
+    assert client.departures[:3] == [
+        "2026-11-17T09:00:00+00:00",
+        "2026-11-17T09:15:00+00:00",
+        "2026-11-17T14:00:00+00:00",
+    ]
     assert result["routes"]["features"][0]["properties"]["label"] == "22"

@@ -62,10 +62,10 @@ def _line_coords(geojson) -> list:
     return []
 
 
-def _extend(target: list, points) -> None:
+def _extend(target: list, points, precision: int = 6) -> None:
     """Додає точки в лінію, пропускаючи дубль на стику двох сегментів."""
     for p in points:
-        pt = [round(p[0], 6), round(p[1], 6)]
+        pt = [round(p[0], precision), round(p[1], precision)]
         if not target or target[-1] != pt:
             target.append(pt)
 
@@ -130,7 +130,8 @@ def build_traveltime_routes_geojson(routes: list[dict]) -> dict:
             if not points:
                 continue
             coordinates = []
-            _extend(coordinates, [[point["lng"], point["lat"]] for point in points])
+            # Keep provider's detailed road geometry instead of rounding away its vertices.
+            _extend(coordinates, [[point["lng"], point["lat"]] for point in points], precision=8)
             if len(coordinates) < 2:
                 continue
 
@@ -159,6 +160,7 @@ def build_traveltime_routes_geojson(routes: list[dict]) -> dict:
 
             properties = {
                 "transport_mode": route.get("transport_mode"),
+                "travel_time_seconds": route.get("travel_time"),
                 "mode": mode,
                 "section_type": section_type,
                 "route_index": route_index,
