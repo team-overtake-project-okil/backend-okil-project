@@ -16,6 +16,11 @@ from routers.stops import router as stops_router
 from routers.point_types import router as point_types_router
 from routers.hexagons import router as hexagons_router
 
+from routers.debug import router as debug_router
+
+if settings.DEBUG_ENABLED and not (settings.DEBUG_USER and settings.DEBUG_PASSWORD):
+    raise RuntimeError('Configure debug credentials before enabling debug endpoints')
+
 app = FastAPI()
 app.state.chat_sessions = ChatSessionStore(
     Redis.from_url(
@@ -31,10 +36,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET"],
-    allow_headers=[],
+    allow_methods=["GET", "POST"] if settings.DEBUG_ENABLED else ["GET"],
+    allow_headers=["Authorization"] if settings.DEBUG_ENABLED else [],
 )
 app.add_middleware(RequestTimingMiddleware)
+if settings.DEBUG_ENABLED:
+    app.include_router(debug_router)
 app.include_router(points_router)
 app.include_router(routes_router)
 app.include_router(stops_router)

@@ -1,8 +1,9 @@
-# Chat WebSocket → AI service (#74)
+# Chat WebSocket → AI service (#74, #86)
 
 The adapter connects the `/ws/chat` endpoint from PR #67 to the classifier,
 `GroqClient` and `answer_intent` from PR #69. It does not reimplement the model,
-change scoring, add a chat REST endpoint or change Redis session storage.
+change scoring or add a chat REST endpoint. Issue #86 adds an optional
+`nextPrompt` to completed events and stored history turns.
 
 ## Dependencies and setup
 
@@ -10,10 +11,16 @@ PR #69 (`feat/add-ai_model-validation`) supplies `app.ai_assistant`,
 `app.intent_classifier`, model dependencies and database context builders.
 At implementation time, its reviewed head was
 `0202119c576f059328b161dbc085f387d0ca728b` and it was not merged into main.
-For the assembled local project, this branch includes unchanged copies of
+For the assembled local project, the integration initially included copies of
 `app/ai_assistant.py` and `app/intent_classifier.py` from that exact revision.
-It deliberately does not import the upstream scoring changes, vector table or
-DDL. `sentence-transformers` is included in requirements. Lazy initialization
+Issue #86 extends `GroqClient` with optional next-prompt generation and preserves
+the upstream classifier and knowledge configuration.
+The current classifier descriptions and their scenario encoding are documented in
+[intent_classification.md](intent_classification.md). The current main also has
+the `ai_knowledge` vector model; curated text export is documented in
+[ai_knowledge_ingestion.md](ai_knowledge_ingestion.md). That export does not yet
+add retrieval to `get_project_information`.
+`sentence-transformers` is included in requirements. Lazy initialization
 still returns `ai_unavailable` when a deployment lacks the model or key.
 
 With the dependencies available, install the combined requirements, configure
@@ -74,7 +81,9 @@ The event sequence remains `message.accepted`, `answer.status` with stage
 
    A later `Які тут місця?` can reuse that H3 from completed Redis history.
 5. `answer_intent` builds factual DB context and returns the upstream answer.
-   Valid nonempty answers are saved before `answer.completed` is sent.
+6. Optional next-prompt generation enriches the answer within the remaining
+   reply budget. The answer and any valid suggestion are saved together before
+   `answer.completed` is sent.
 
 The current UI prefixes text with the selected H3, displayed score and
 category scores. The adapter removes that specific header before classifying
@@ -83,8 +92,74 @@ PostgreSQL, not trusted from client text. Explicit project FAQs and requests
 to explain a hex score receive narrow routing corrections for observed
 classifier confusion. Other parts continue through the upstream classifier.
 Custom user weights are not passed to answer_intent, so AI score context uses
-server defaults. The upstream API does not accept a general transcript: Redis
-preserves history, and the adapter reuses only supported H3 context.
+server defaults. Main-answer generation does not accept a general transcript:
+Redis preserves history, and the main-answer adapter reuses only supported H3
+context. Suggestion generation uses the limited context described below.
+
+## Contextual next-prompts (#86)
+
+After a successful main answer, `generate_next_prompt` asks the existing Groq
+client for one optional follow-up question, phrased as a question the user can
+send to the assistant. It uses the same key and configured model. There is one
+additional provider request per eligible new answer; duplicate request IDs reuse
+the saved result without either provider request.
+
+The suggestion request includes the current question (without the map's score
+header), up to 8,000 characters of the main answer, a validated H3 ID when
+available, the last three user questions and the last three saved suggestions.
+Session tokens and request IDs are not included. H3 context comes only from user
+questions, never from model output. Unlike the main-answer classifier path, the
+suggestion request includes the whole current question; its prompt treats this
+as context, not as instructions.
+
+The prompt limits suggestions to supported OKIL topics, requires H3 context for
+questions about a specific cell, and requests `null` when a follow-up would be
+irrelevant or the available information is insufficient. The unrelated-question
+reply skips suggestion generation entirely. The model returns internal JSON;
+the WebSocket exposes only the extracted plain string:
+
+```json
+{"type":"answer.completed","requestId":"req_1","text":"<main answer>","nextPrompt":"Які категорії оцінює OKIL?"}
+```
+
+Suggestions longer than 240 characters, empty values, non-string values,
+multiline text, markup and links are rejected. Exact repeats of the current or
+saved questions/suggestions are rejected after case, punctuation and whitespace
+normalization. Semantic relevance and paraphrase avoidance rely on the model.
+When omitted, `nextPrompt` is absent rather than an empty string or JSON object.
+
+Before returning a suggestion, the adapter checks it with the same classifier
+and routing corrections used for normal questions. It omits unrecognized
+questions, POI/score questions without H3 context, and model-invented H3 IDs.
+General questions such as `Які категорії оцінює OKIL?` and
+`Які критерії ... в OKIL?` use the project-information service rather than
+requiring a selected cell. This correction excludes questions referring to a
+specific cell or asking for places. The classifier model and supported intent
+types are unchanged.
+
+The optional step has a three-second timeout, further limited by whatever
+remains of the existing 30-second generation budget. A timeout, provider error,
+invalid JSON or rejected suggestion returns the ready main answer without the
+field. No extra retry or fallback model is used. Disconnect cancellation still
+propagates and releases the session claim.
+
+History stores the same optional `nextPrompt`, so reconnects and duplicate
+requests return the original suggestion. Old Redis turns without that field
+continue to work without migration. The existing frontend can ignore the new
+field; rendering a suggestion is outside this backend task.
+
+### Compatibility with session clearing (#83)
+
+The existing `session.clear` event removes the entire current Redis session,
+including every saved `nextPrompt`. The client must open a new session before
+sending another question. Request IDs in the new session do not replay the
+deleted answers or suggestions, and generation receives an empty history.
+
+Clearing a session while its optional suggestion is being generated cancels
+that socket's provider task. If another socket clears the same session, a late
+answer or suggestion cannot recreate the deleted history: saving it fails with
+`session_expired`. The clear-event token validation and error envelope are
+unchanged.
 
 ## Errors and session guarantees
 
@@ -114,12 +189,65 @@ settings and other endpoints remain unchanged.
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r tests/requirements-chat.txt
-.\.venv\Scripts\python.exe -m pytest tests/test_chat_service.py tests/test_chat_websocket.py -q
+.\.venv\Scripts\python.exe -m pytest tests/test_ai_assistant.py tests/test_chat_service.py tests/test_chat_websocket.py tests/test_chat_startup.py -q
 ```
 
 The WebSocket tests use a Redis-compatible in-process fake and real session
 store operations; no shared Redis or PostgreSQL data is touched. Unit tests
 exercise the adapter contract without downloading models or using credentials.
+Next-prompt checks cover contextual output, omission, repeated/malformed output,
+provider failure, deadline exhaustion, persistence, reconnect and duplicate
+requests. These checks mock Groq and do not measure live suggestion quality.
+
+### Merge verification with current main (2026-11-17)
+
+After integrating main's session clearing and classifier/knowledge updates, the
+full backend suite passes 447 tests. Both the original next-prompt tests and
+the session-clearing tests are retained. Additional integration tests verify
+that clearing removes saved suggestions, cancels an in-flight suggestion, and
+prevents a suggestion completing on another socket from restoring deleted
+history. These checks use the in-process Redis fixture and controlled providers.
+
+### Live verification of #86 (2026-11-15)
+
+The final changes pass 110 AI/chat tests, including regressions for generated
+project questions being misclassified as cell-score requests and for omitting
+suggestions that cannot be processed with the available context.
+
+A separate live check used the actual `main:app` over a localhost WebSocket,
+Groq `openai/gpt-oss-20b`, the real multilingual Sentence Transformers classifier,
+Redis 7.0.15 in WSL and PostgreSQL. Database sessions were explicitly read-only;
+startup schema initialization was disabled. Only the test's own anonymous
+Redis session was removed afterward.
+
+- A project question returned an answer and a plain-text follow-up about the
+  health category's criteria. Sending that generated question back to the chat
+  succeeded without an H3 ID and returned the actual catalog radii.
+- A score question for `891e7689e8fffff` returned its main answer with no
+  suggestion, exercising the optional-field path.
+- Reconnecting restored all three completed turns, including their suggestions.
+- Replaying the original request returned the identical completed event, with
+  no extra main-answer or suggestion provider calls.
+- Separate direct Groq checks returned contextual suggestions in under
+  1.4 seconds and `null` for a user who explicitly ended the conversation.
+
+This verifies the backend protocol and real providers; frontend rendering is
+outside #86. Failure, timeout and disconnect cases are covered by automated
+tests with controlled failures, rather than by disrupting the live providers.
+
+The local `.env` uses the following non-secret startup settings:
+
+```dotenv
+DB_INIT_ON_STARTUP=false
+CHAT_PRELOAD_AI=true
+REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+For an existing Ubuntu/WSL Redis installation, start it with
+`wsl -d Ubuntu -u root -- service redis-server start`. The first model download
+and load took about 38 seconds, so preload keeps this outside the reply budget.
+Install `requirements.txt` into the same environment used to run Uvicorn;
+both `sentence-transformers` and `websockets` must be installed for the live flow.
 
 Controlled integration also used the unchanged service/classifier modules from
 PR #69 and the unchanged React `Chat.tsx` from PR #95. The actual component was

@@ -1,17 +1,20 @@
 import asyncio
 import os
 import sys
+from pathlib import Path
 import pandas as pd
 import h3
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.database import async_session_maker
+from app.jobs.validation import require_point_types
 from app.models import HexTable, Point
 
 SOURCE_NAME = "lviv_city_council"
 H3_RESOLUTION = 9
 CHUNK = 2000
+SOURCE_FILES = ("2. Найпростіші укриття.xls", "3. Захисні споруди.xls")
 
 
 def chunks(items, size=CHUNK):
@@ -20,6 +23,9 @@ def chunks(items, size=CHUNK):
 
 
 def load_shelter_data(simplest_path: str, protective_path: str) -> list[dict]:
+    for path in (simplest_path, protective_path):
+        if not Path(path).is_file():
+            raise FileNotFoundError(f"Missing shelter source: {path}")
     points = []
 
     # 1. Найпростіші укриття (xls)
@@ -94,22 +100,24 @@ def load_shelter_data(simplest_path: str, protective_path: str) -> list[dict]:
     return points
 
 
-async def main(dry_run: bool = False):
+async def main(dry_run: bool = False, *, sources_dir: str | None = None):
     simplest_path = "data/Sources/2. Найпростіші укриття.xls" if os.path.exists("data/Sources/2. Найпростіші укриття.xls") else "2. Найпростіші укриття.xls"
     protective_path = "data/Sources/3. Захисні споруди.xls" if os.path.exists("data/Sources/3. Захисні споруди.xls") else "3. Захисні споруди.xls"
+    if sources_dir is not None:
+        simplest_path, protective_path = (str(Path(sources_dir) / name) for name in SOURCE_FILES)
 
     points = load_shelter_data(simplest_path, protective_path)
     print(f"📦 Відфільтровано точок для імпорту: {len(points)}")
 
     if not points:
-        print("❌ Немає даних для запису.")
-        return
+        raise ValueError("Немає придатних укриттів для запису")
 
     if dry_run:
         print("🧪 --dry-run: Дані не було збережено в БД.")
         return
 
     async with async_session_maker() as session:
+        await require_point_types(session, {"shelter": "security"})
         # 1. Завантажуємо існуючі гексагони
         hex_res = await session.execute(select(HexTable.h3_id))
         existing_h3_ids = set(hex_res.scalars().all())
@@ -119,6 +127,8 @@ async def main(dry_run: bool = False):
         valid_points = [p for p in points if p["h3_id"] in existing_h3_ids]
         skipped_count = len(points) - len(valid_points)
         print(f"🎯 Точок для запису: {len(valid_points)} (пропущено поза сіткою: {skipped_count})")
+        if not valid_points:
+            raise ValueError("Жодне укриття не потрапило в наявну сітку гексагонів")
 
         # 3. Дописуємо точки у `points` без створення нової транзакції з нуля
         points_to_insert = [

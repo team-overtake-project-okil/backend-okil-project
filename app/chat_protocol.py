@@ -35,19 +35,24 @@ def parse_session_token(token: JsonValue) -> str | None:
     return token
 
 
-def parse_question(payload: dict[str, JsonValue]) -> tuple[str, str]:
+def parse_request_id(payload: dict[str, JsonValue]) -> str:
     raw_id = payload.get("requestId")
     request_id = None
     if isinstance(raw_id, str) and raw_id.strip() and len(raw_id) <= MAX_REQUEST_ID_LENGTH:
         request_id = raw_id
 
-    if payload.get("type") != "message.send":
-        raise ChatProtocolError(
-            "invalid_message", "Expected type session.open or message.send.", request_id
-        )
     if request_id is None:
         raise ChatProtocolError(
             "invalid_message", "Provide a non-empty requestId of up to 64 characters."
+        )
+    return request_id
+
+
+def parse_question(payload: dict[str, JsonValue]) -> tuple[str, str]:
+    request_id = parse_request_id(payload)
+    if payload.get("type") != "message.send":
+        raise ChatProtocolError(
+            "invalid_message", "Expected type session.open, session.clear or message.send.", request_id
         )
 
     question = payload.get("text")
