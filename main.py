@@ -7,6 +7,7 @@ from sqlalchemy import text
 from app.chat_sessions import ChatSessionStore
 from app.config import settings
 from app.database import engine, Base
+from app.request_timing import RequestTimingMiddleware
 import app.models
 from routers.chat import router as chat_router
 from routers.points import router as points_router
@@ -38,6 +39,7 @@ app.add_middleware(
     allow_methods=["GET", "POST"] if settings.DEBUG_ENABLED else ["GET"],
     allow_headers=["Authorization"] if settings.DEBUG_ENABLED else [],
 )
+app.add_middleware(RequestTimingMiddleware)
 if settings.DEBUG_ENABLED:
     app.include_router(debug_router)
 app.include_router(points_router)
