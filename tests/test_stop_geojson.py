@@ -1,4 +1,7 @@
-from app.route_geojson import build_hex_stops_geojson, build_traveltime_routes_geojson
+from app.route_geojson import (
+    build_hex_stops_geojson,
+    build_traveltime_routes_geojson,
+)
 
 
 def test_traveltime_route_parts_use_short_transit_label_and_geojson():

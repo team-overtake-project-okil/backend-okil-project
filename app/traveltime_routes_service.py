@@ -1,9 +1,12 @@
 from datetime import datetime, time, timedelta
+import json
 import re
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.mobility_transport import LVIV_CENTER, LVIV_VALID_TRANSIT_ROUTE_NUMBERS, mobility_modes
@@ -30,6 +33,16 @@ def _transit_route_number(part: dict[str, Any]) -> str | None:
         if match:
             return match.group(1).upper()
     return None
+
+
+def _database_route_number(route_name: str) -> str | None:
+    prefix = route_name.split(":", 1)[0].strip().upper()
+    match = re.search(r"\d{1,3}", prefix)
+    if not match:
+        return None
+    tail = prefix[match.end():]
+    suffix = "A" if tail and tail[0].isalpha() else ""
+    return f"{match.group(0)}{suffix}"
 
 
 def _is_valid_transit_route(route: dict[str, Any]) -> bool:
@@ -59,6 +72,105 @@ def _is_valid_transit_route(route: dict[str, Any]) -> bool:
 
 class TravelTimeRouteFormatError(RuntimeError):
     """Raised when TravelTime returns invalid route geometry."""
+
+
+async def _route_geometry_from_stops(
+    db: AsyncSession,
+    points: list[list[float]],
+    route_number: str,
+) -> list[list[float]] | None:
+    stop_ids: list[int] = []
+    for point in points:
+        if (
+            not isinstance(point, (list, tuple))
+            or len(point) < 2
+            or not isinstance(point[0], (int, float))
+            or not isinstance(point[1], (int, float))
+        ):
+            return None
+        lon, lat = point[0], point[1]
+        result = await db.execute(
+            text("""
+                SELECT id
+                FROM stops
+                WHERE source = 'easyway'
+                  AND ST_DWithin(
+                    geom,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
+                    5
+                  )
+                ORDER BY ST_Distance(
+                    geom,
+                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
+                )
+                LIMIT 1
+            """),
+            {"lon": lon, "lat": lat},
+        )
+        row = result.first()
+        if row is None:
+            return None
+        if not stop_ids or stop_ids[-1] != row[0]:
+            stop_ids.append(row[0])
+
+    if len(stop_ids) < 2:
+        return None
+
+    coordinates: list[list[float]] = []
+    for start_stop_id, end_stop_id in zip(stop_ids, stop_ids[1:]):
+        result = await db.execute(
+            text("""
+                SELECT ST_AsGeoJSON(g.geom::geometry) AS geojson, r.name AS route_name
+                FROM route_segment_geometries g
+                JOIN routes r ON r.id = g.route_id
+                WHERE g.start_stop_id = :start_stop_id
+                  AND g.end_stop_id = :end_stop_id
+                  AND r.source = 'easyway'
+            """),
+            {"start_stop_id": start_stop_id, "end_stop_id": end_stop_id},
+        )
+        match = next(
+            (
+                row for row in result.mappings()
+                if _database_route_number(row["route_name"]) == route_number
+            ),
+            None,
+        )
+        if match is None:
+            return None
+        geometry = match["geojson"]
+        if isinstance(geometry, str):
+            geometry = json.loads(geometry)
+        if geometry.get("type") != "LineString":
+            return None
+        for coordinate in geometry.get("coordinates", []):
+            coord = [float(coordinate[0]), float(coordinate[1])]
+            if not coordinates or coordinates[-1] != coord:
+                coordinates.append(coord)
+
+    return coordinates if len(coordinates) >= 2 else None
+
+
+async def _use_route_specific_bus_geometry(
+    geojson: dict[str, Any], db: AsyncSession
+) -> None:
+    valid_bus_numbers = LVIV_VALID_TRANSIT_ROUTE_NUMBERS["bus"]
+    for feature in geojson.get("features", []):
+        properties = feature.get("properties", {})
+        if (
+            properties.get("transport_mode") != "bus"
+            or str(properties.get("mode", "")).lower() not in {"bus", "minibus", "marshrutka"}
+        ):
+            continue
+        route_number = properties.get("route_number")
+        if route_number not in valid_bus_numbers:
+            continue
+        geometry = feature.get("geometry", {})
+        replacement = await _route_geometry_from_stops(
+            db, geometry.get("coordinates", []), route_number
+        )
+        if replacement:
+            geometry["coordinates"] = replacement
 
 
 def _route_departure_times() -> list[datetime]:
@@ -94,6 +206,7 @@ async def get_traveltime_routes(
     origin: tuple[float, float],
     transportation: str = "bus",
     destination: tuple[float, float] = LVIV_CENTER,
+    db: AsyncSession | None = None,
 ) -> dict[str, Any]:
     if not settings.TRAVELTIME_API_KEY or not settings.TRAVELTIME_APP_ID:
         raise RuntimeError("TravelTime API credentials are not configured")
@@ -156,4 +269,6 @@ async def get_traveltime_routes(
         geojson = build_traveltime_routes_geojson(routes)
     except (KeyError, TypeError, ValueError) as exc:
         raise TravelTimeRouteFormatError("TravelTime API returned invalid route geometry") from exc
+    if db is not None:
+        await _use_route_specific_bus_geometry(geojson, db)
     return {"h3_id": h3_id, "routes": geojson}

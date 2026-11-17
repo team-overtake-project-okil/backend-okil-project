@@ -139,7 +139,11 @@ async def get_hexagon(
             raise HTTPException(status_code=404, detail="Hexagon not found")
         try:
             route_result = await get_traveltime_routes(
-                h3_id, (float(row["lat"]), float(row["lon"])), transportation, LVIV_CENTER
+                h3_id,
+                (float(row["lat"]), float(row["lon"])),
+                transportation,
+                LVIV_CENTER,
+                db=db,
             )
         except TravelTimeRouteFormatError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc

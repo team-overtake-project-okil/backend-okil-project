@@ -130,7 +130,6 @@ def build_traveltime_routes_geojson(routes: list[dict]) -> dict:
             if not points:
                 continue
             coordinates = []
-            # Keep provider's detailed road geometry instead of rounding away its vertices.
             _extend(coordinates, [[point["lng"], point["lat"]] for point in points], precision=8)
             if len(coordinates) < 2:
                 continue

@@ -18,8 +18,8 @@ from shapely.ops import substring
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from app.database import async_session_maker
-from app.models import Route, RouteSegment, RouteSegmentLink, Stop
+from app.database import Base, async_session_maker, engine
+from app.models import Route, RouteSegment, RouteSegmentGeometry, RouteSegmentLink, Stop
 
 SOURCE_NAME = "easyway"
 CHUNK = 3000  # asyncpg: максимум 32767 параметрів на запит
@@ -120,6 +120,7 @@ def parse_archive(zip_path: str, known_stops: set, known_routes: set) -> dict:
         {trip_info[tid][2] for _, tid in best.values() if trip_info[tid][2]},
     )
 
+    route_geometries = []
     segments = {}       # (start_ext, end_ext) -> WKT (однакові ділянки стиснуті в одну)
     segment_links = []  # (route_ext_id, start_ext, end_ext, sequence_order)
     straight_fallbacks = 0
@@ -136,20 +137,30 @@ def parse_archive(zip_path: str, known_stops: set, known_routes: set) -> dict:
             a, b = ids[i], ids[i + 1]
             if a == b:
                 continue
+            route_segment = make_segment(stop_point[a], stop_point[b], line)
+            if line is None:
+                straight_fallbacks += 1
             if (a, b) not in segments:
-                if line is None:
-                    straight_fallbacks += 1
-                segments[(a, b)] = make_segment(stop_point[a], stop_point[b], line).wkt
+                segments[(a, b)] = route_segment.wkt
+            route_geometries.append((route_ext_id, a, b, i + 1, route_segment.wkt))
             segment_links.append((route_ext_id, a, b, i + 1))
 
     return {
         "segments": segments,
+        "route_geometries": route_geometries,
         "segment_links": segment_links,
         "straight_fallbacks": straight_fallbacks,
     }
 
 
-async def main(zip_path: str, dry_run: bool = False):
+async def main(
+    zip_path: str,
+    dry_run: bool = False,
+    route_geometries_only: bool = False,
+):
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     # 1. Що вже є в БД (після load_gtfs.py)
     async with async_session_maker() as session:
         stop_rows = (await session.execute(
@@ -181,7 +192,7 @@ async def main(zip_path: str, dry_run: bool = False):
           f"прямих_ліній_без_shape={data['straight_fallbacks']}")
 
     # ЗАХИСТ: якщо сегментів немає, старі не чіпаємо.
-    if not data["segments"] or not data["segment_links"]:
+    if not data["segments"] or not data["segment_links"] or not data["route_geometries"]:
         print("Error: не вдалося побудувати сегменти. Імпорт скасовано, старі дані збережено.")
         return
 
@@ -190,6 +201,29 @@ async def main(zip_path: str, dry_run: bool = False):
         return
 
     # 3. Запис
+    route_geometry_rows = [
+        {
+            "route_id": route_id_map[route_ext_id],
+            "sequence_order": order,
+            "start_stop_id": stop_id_map[start_ext],
+            "end_stop_id": stop_id_map[end_ext],
+            "geom": f"SRID=4326;{wkt}",
+        }
+        for route_ext_id, start_ext, end_ext, order, wkt in data["route_geometries"]
+    ]
+
+    if route_geometries_only:
+        async with async_session_maker() as session:
+            async with session.begin():
+                source_routes = select(Route.id).where(Route.source == SOURCE_NAME)
+                await session.execute(
+                    delete(RouteSegmentGeometry).where(RouteSegmentGeometry.route_id.in_(source_routes))
+                )
+                for part in chunks(route_geometry_rows):
+                    await session.execute(pg_insert(RouteSegmentGeometry).values(part))
+        print(f"Route-specific geometries loaded: {len(route_geometry_rows)}")
+        return
+
     async with async_session_maker() as session:
         async with session.begin():
             source_routes = select(Route.id).where(Route.source == SOURCE_NAME)
@@ -233,6 +267,10 @@ async def main(zip_path: str, dry_run: bool = False):
             for part in chunks(links_to_insert):
                 await session.execute(pg_insert(RouteSegmentLink).values(part))
 
+            await session.execute(delete(RouteSegmentGeometry))
+            for part in chunks(route_geometry_rows):
+                await session.execute(pg_insert(RouteSegmentGeometry).values(part))
+
     print(f"Segments successfully loaded: segments={len(segment_id_map)} "
           f"segment_links={len(links_to_insert)}")
 
@@ -240,4 +278,8 @@ async def main(zip_path: str, dry_run: bool = False):
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     archive_path = args[0] if args else "data/static.zip"
-    asyncio.run(main(archive_path, dry_run="--dry-run" in sys.argv))
+    asyncio.run(main(
+        archive_path,
+        dry_run="--dry-run" in sys.argv,
+        route_geometries_only="--route-geometries-only" in sys.argv,
+    ))
