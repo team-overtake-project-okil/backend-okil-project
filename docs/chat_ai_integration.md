@@ -11,11 +11,16 @@ PR #69 (`feat/add-ai_model-validation`) supplies `app.ai_assistant`,
 `app.intent_classifier`, model dependencies and database context builders.
 At implementation time, its reviewed head was
 `0202119c576f059328b161dbc085f387d0ca728b` and it was not merged into main.
-The original local assembly included unchanged copies of `app/ai_assistant.py`
-and `app/intent_classifier.py` from that exact revision. Issue #86 extends
-`GroqClient` with optional next-prompt generation; the classifier is unchanged.
-It deliberately does not import the upstream scoring changes, vector table or
-DDL. `sentence-transformers` is included in requirements. Lazy initialization
+For the assembled local project, the integration initially included copies of
+`app/ai_assistant.py` and `app/intent_classifier.py` from that exact revision.
+Issue #86 extends `GroqClient` with optional next-prompt generation and preserves
+the upstream classifier and knowledge configuration.
+The current classifier descriptions and their scenario encoding are documented in
+[intent_classification.md](intent_classification.md). The current main also has
+the `ai_knowledge` vector model; curated text export is documented in
+[ai_knowledge_ingestion.md](ai_knowledge_ingestion.md). That export does not yet
+add retrieval to `get_project_information`.
+`sentence-transformers` is included in requirements. Lazy initialization
 still returns `ai_unavailable` when a deployment lacks the model or key.
 
 With the dependencies available, install the combined requirements, configure
@@ -143,6 +148,19 @@ requests return the original suggestion. Old Redis turns without that field
 continue to work without migration. The existing frontend can ignore the new
 field; rendering a suggestion is outside this backend task.
 
+### Compatibility with session clearing (#83)
+
+The existing `session.clear` event removes the entire current Redis session,
+including every saved `nextPrompt`. The client must open a new session before
+sending another question. Request IDs in the new session do not replay the
+deleted answers or suggestions, and generation receives an empty history.
+
+Clearing a session while its optional suggestion is being generated cancels
+that socket's provider task. If another socket clears the same session, a late
+answer or suggestion cannot recreate the deleted history: saving it fails with
+`session_expired`. The clear-event token validation and error envelope are
+unchanged.
+
 ## Errors and session guarantees
 
 - `ai_unavailable`: dependency, model or provider configuration cannot initialize.
@@ -180,6 +198,15 @@ exercise the adapter contract without downloading models or using credentials.
 Next-prompt checks cover contextual output, omission, repeated/malformed output,
 provider failure, deadline exhaustion, persistence, reconnect and duplicate
 requests. These checks mock Groq and do not measure live suggestion quality.
+
+### Merge verification with current main (2026-11-17)
+
+After integrating main's session clearing and classifier/knowledge updates, the
+full backend suite passes 447 tests. Both the original next-prompt tests and
+the session-clearing tests are retained. Additional integration tests verify
+that clearing removes saved suggestions, cancels an in-flight suggestion, and
+prevents a suggestion completing on another socket from restoring deleted
+history. These checks use the in-process Redis fixture and controlled providers.
 
 ### Live verification of #86 (2026-11-15)
 

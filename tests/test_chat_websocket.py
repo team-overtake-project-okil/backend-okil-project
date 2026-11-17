@@ -14,7 +14,7 @@ fakeredis = pytest.importorskip("fakeredis", reason="Install tests/requirements-
 
 from app import chat_service
 from app.chat_service import ChatReplyError
-from app.chat_sessions import ChatSessionStore
+from app.chat_sessions import ChatSessionError, ChatSessionStore
 from routers import chat
 
 ORIGIN = "http://localhost:5173"
@@ -298,3 +298,201 @@ def test_disconnect_during_next_prompt_cancels_provider_and_releases_session(cli
         send(ws)
         accepted(ws)
         assert ws.receive_json()["text"] == reply.return_value
+
+def clear_session(ws, token, request_id="clear_1"):
+    ws.send_json({"type": "session.clear", "requestId": request_id, "sessionToken": token})
+    return ws.receive_json()
+
+
+def test_clear_deletes_only_current_session_and_allows_new_conversation(client):
+    http, reply, store = client
+    with connect(http) as ws, connect(http) as other:
+        token = open_session(ws)["sessionToken"]
+        other_token = open_session(other)["sessionToken"]
+        send(ws)
+        accepted(ws)
+        ws.receive_json()
+        assert clear_session(ws, token) == {"type": "session.cleared", "requestId": "clear_1", "deleted": True}
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0
+        assert open_session(other, other_token)["history"] == []
+        send(ws, "after_clear")
+        assert ws.receive_json()["code"] == "session_required"
+        assert open_session(ws)["sessionToken"] != token
+        ws.send_json({"type": "session.open", "sessionToken": token})
+        assert ws.receive_json()["code"] == "session_expired"
+
+
+@pytest.mark.parametrize("bad_token", [None, "invalid", "і" * 43, "a" * 43])
+def test_clear_rejects_missing_invalid_or_different_token(client, bad_token):
+    http, _, _ = client
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        event = clear_session(ws, bad_token)
+        assert event["type"] == "error"
+        assert event["requestId"] == "clear_1"
+        assert event["code"] in {"invalid_message", "session_required"}
+        assert open_session(ws, token)["history"] == []
+
+
+def test_shared_sockets_can_clear_already_deleted_session_idempotently(client):
+    http, _, _ = client
+    with connect(http) as first, connect(http) as second:
+        token = open_session(first)["sessionToken"]
+        open_session(second, token)
+        assert clear_session(first, token)["deleted"] is True
+        assert clear_session(second, token)["deleted"] is False
+        assert open_session(second)["history"] == []
+
+
+def test_clear_cancels_own_reply(client):
+    http, reply, _ = client
+    cancelled = threading.Event()
+
+    async def pending(*args):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    reply.side_effect = pending
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        send(ws)
+        accepted(ws)
+        assert clear_session(ws, token)["type"] == "session.cleared"
+        assert cancelled.wait(2)
+        assert open_session(ws)["history"] == []
+
+
+def test_reply_on_another_socket_cannot_recreate_deleted_history(client):
+    http, reply, store = client
+    release = asyncio.Event()
+
+    async def pending(*args):
+        await release.wait()
+        return "Late answer"
+
+    reply.side_effect = pending
+    with connect(http) as first, connect(http) as second:
+        token = open_session(first)["sessionToken"]
+        open_session(second, token)
+        send(first)
+        accepted(first)
+        assert clear_session(second, token)["deleted"] is True
+        http.portal.call(release.set)
+        assert first.receive_json()["code"] == "session_expired"
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0
+
+
+def test_clear_storage_failure_preserves_session_for_retry(client, monkeypatch):
+    http, _, store = client
+    original = store.clear
+    monkeypatch.setattr(store, "clear", AsyncMock(side_effect=RedisConnectionError("private URL")))
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        event = clear_session(ws, token)
+        assert event["code"] == "storage_unavailable"
+        assert event["requestId"] == "clear_1"
+        assert "private" not in event["message"]
+        monkeypatch.setattr(store, "clear", original)
+        assert clear_session(ws, token)["deleted"] is True
+
+
+def test_clear_store_validates_token_and_expired_session(client):
+    http, _, store = client
+    with pytest.raises(ChatSessionError, match="Invalid sessionToken"):
+        http.portal.call(store.clear, "bad")
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        http.portal.call(store.redis.delete, store._key(token))
+        assert clear_session(ws, token)["deleted"] is False
+
+
+def test_clear_requires_valid_request_id(client):
+    http, _, _ = client
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        assert clear_session(ws, token, " ")["code"] == "invalid_message"
+        assert clear_session(ws, token)["deleted"] is True
+
+
+def test_clear_removes_saved_next_prompt_and_new_session_does_not_replay_it(client, monkeypatch):
+    http, reply, store = client
+    suggestion = "Які категорії оцінює OKIL?"
+    generate = AsyncMock(return_value=suggestion)
+    monkeypatch.setattr(chat, "generate_next_prompt", generate)
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json()["nextPrompt"] == suggestion
+        assert open_session(ws, token)["history"][0]["nextPrompt"] == suggestion
+
+        assert clear_session(ws, token)["deleted"] is True
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0
+        fresh = open_session(ws)
+        assert fresh["sessionToken"] != token
+        assert fresh["history"] == []
+
+        # Reusing an ID in the new session must generate a fresh answer.
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json()["nextPrompt"] == suggestion
+        assert reply.await_count == 2
+        assert generate.await_count == 2
+        assert reply.await_args.args[1] == []
+        assert generate.await_args.args[2] == []
+
+
+def test_clear_during_next_prompt_cancels_provider_and_discards_turn(client, monkeypatch):
+    http, _, store = client
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def pending(*args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    provider = AsyncMock(side_effect=pending)
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=SimpleNamespace(
+        client=SimpleNamespace(next_prompt=provider),
+    )))
+    monkeypatch.setattr(chat, "generate_next_prompt", chat_service.generate_next_prompt)
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        send(ws)
+        accepted(ws)
+        assert started.wait(2)
+        assert clear_session(ws, token)["type"] == "session.cleared"
+        assert cancelled.wait(2)
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0
+        assert open_session(ws)["history"] == []
+        ws.send_json({"type": "session.open", "sessionToken": token})
+        assert ws.receive_json()["code"] == "session_expired"
+    provider.assert_awaited_once()
+
+
+def test_other_socket_clear_during_next_prompt_cannot_restore_deleted_turn(client, monkeypatch):
+    http, _, store = client
+    started = threading.Event()
+    release = asyncio.Event()
+
+    async def pending(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return "Які категорії оцінює OKIL?"
+
+    monkeypatch.setattr(chat, "generate_next_prompt", AsyncMock(side_effect=pending))
+    with connect(http) as first, connect(http) as second:
+        token = open_session(first)["sessionToken"]
+        open_session(second, token)
+        send(first)
+        accepted(first)
+        assert started.wait(2)
+        assert clear_session(second, token)["deleted"] is True
+        http.portal.call(release.set)
+        assert first.receive_json()["code"] == "session_expired"
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0

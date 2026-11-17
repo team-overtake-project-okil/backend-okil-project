@@ -19,7 +19,7 @@ from pgvector.sqlalchemy import Vector
 from app.database import Base
 
 
-AI_EMBEDDING_DIMENSIONS = 1536
+AI_EMBEDDING_DIMENSIONS = 384
 
 
 class H3IndexType(UserDefinedType):
