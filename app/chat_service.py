@@ -107,9 +107,27 @@ class ChatAIService:
                      if (intent := self._explicit_intent(part)) is not None)
         if not parts:
             return "Я допомагаю з питаннями про OKIL, оцінки ділянок і місця в них. Уточніть запитання."
+        # Об'єднуємо фрагменти з однаковим інтентом в один запит до LLM
+        merged_parts: list[tuple[str, object]] = []
+        for part_text, intent in parts:
+            if merged_parts and merged_parts[-1][1] == intent:
+                prev_text, _ = merged_parts[-1]
+                merged_parts[-1] = (f"{prev_text} {part_text}", intent)
+            else:
+                merged_parts.append((part_text, intent))
+        parts = merged_parts
 
         needs_hex = any(
-            intent.value in {"poi", "hex_score"}
+            intent.value in {
+                "poi", 
+                "hex_score", 
+                "hex_overview", 
+                "mobility_routes", 
+                "weights_simulation",
+                "transit_lines",          
+                "neighborhood_context",   
+                "infrastructure_gaps"
+            }
             for _, intent in parts
         )
         cell = hex_context(text, history) if needs_hex else None
