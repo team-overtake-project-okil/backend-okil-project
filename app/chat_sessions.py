@@ -3,7 +3,7 @@ import json
 import secrets
 import time
 from collections.abc import Callable
-from typing import TypedDict, TypeVar
+from typing import NotRequired, TypedDict, TypeVar
 
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
@@ -18,6 +18,7 @@ class ChatTurn(TypedDict):
     requestId: str
     question: str
     answer: str
+    nextPrompt: NotRequired[str]
 
 
 class PendingReply(TypedDict):

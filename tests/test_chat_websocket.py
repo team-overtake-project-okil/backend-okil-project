@@ -1,6 +1,7 @@
 import asyncio
 import threading
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 fakeredis = pytest.importorskip("fakeredis", reason="Install tests/requirements-chat.txt")
 
+from app import chat_service
 from app.chat_service import ChatReplyError
 from app.chat_sessions import ChatSessionError, ChatSessionStore
 from routers import chat
@@ -34,6 +36,7 @@ def client(monkeypatch):
     monkeypatch.setattr(chat.settings, "CORS_ORIGINS", [ORIGIN])
     reply = AsyncMock(return_value="OKIL — відповідь AI на основі даних.")
     monkeypatch.setattr(chat, "generate_reply", reply)
+    monkeypatch.setattr(chat, "generate_next_prompt", AsyncMock(return_value=None))
     with TestClient(app) as http:
         yield http, reply, store
 
@@ -89,6 +92,7 @@ def test_ai_errors_keep_socket_open_do_not_save_failed_turn_and_allow_retry(clie
         send(ws)
         accepted(ws)
         assert ws.receive_json() == {"type": "error", "requestId": "req_1", "code": code, "message": "Зрозуміла помилка AI."}
+        chat.generate_next_prompt.assert_not_awaited()
         assert open_session(ws, ready["sessionToken"])["history"] == []
         send(ws)
         accepted(ws)
@@ -197,6 +201,103 @@ def test_origin_check_remains_in_place(client):
             pytest.fail("Untrusted Origin must be rejected")
     reply.assert_not_awaited()
 
+
+def test_next_prompt_is_plain_text_saved_restored_and_replayed_without_ai(client, monkeypatch):
+    http, reply, _ = client
+    suggestion = "Які категорії оцінює OKIL?"
+    generate = AsyncMock(return_value=suggestion)
+    monkeypatch.setattr(chat, "generate_next_prompt", generate)
+    expected = {
+        "type": "answer.completed", "requestId": "req_1",
+        "text": reply.return_value, "nextPrompt": suggestion,
+    }
+    with connect(http) as ws:
+        ready = open_session(ws)
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json() == expected
+    with connect(http) as ws:
+        restored = open_session(ws, ready["sessionToken"])
+        assert restored["history"] == [{
+            "requestId": "req_1", "question": "Що таке OKIL?",
+            "answer": reply.return_value, "nextPrompt": suggestion,
+        }]
+        send(ws)
+        assert ws.receive_json() == {"type": "message.accepted", "requestId": "req_1"}
+        assert ws.receive_json() == expected
+    reply.assert_awaited_once()
+    generate.assert_awaited_once()
+    assert generate.await_args.args == ("Що таке OKIL?", reply.return_value, [])
+
+
+@pytest.mark.parametrize("failure", ["error", "timeout", "invalid", "none"])
+def test_optional_generation_failure_delivers_and_saves_main_answer(client, monkeypatch, failure):
+    http, reply, _ = client
+    cancelled = threading.Event()
+
+    async def suggest(*args):
+        if failure == "error":
+            raise RuntimeError("private provider error")
+        if failure == "timeout":
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return {"unexpected": "object"} if failure == "invalid" else None
+
+    provider = AsyncMock(side_effect=suggest)
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=SimpleNamespace(
+        client=SimpleNamespace(next_prompt=provider),
+    )))
+    monkeypatch.setattr(chat, "generate_next_prompt", chat_service.generate_next_prompt)
+    # The remaining reply budget is smaller than the optional generation timeout.
+    monkeypatch.setattr(chat, "REPLY_TIMEOUT_SECONDS", 0.05)
+    with connect(http) as ws:
+        ready = open_session(ws)
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json() == {"type": "answer.completed", "requestId": "req_1", "text": reply.return_value}
+        assert open_session(ws, ready["sessionToken"])["history"] == [{
+            "requestId": "req_1", "question": "Що таке OKIL?", "answer": reply.return_value,
+        }]
+        send(ws)
+        assert ws.receive_json()["type"] == "message.accepted"
+        assert "nextPrompt" not in ws.receive_json()
+        provider.assert_awaited_once()
+    if failure == "timeout":
+        assert cancelled.is_set()
+
+
+def test_disconnect_during_next_prompt_cancels_provider_and_releases_session(client, monkeypatch):
+    http, reply, _ = client
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def pending(*args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    provider = AsyncMock(side_effect=pending)
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=SimpleNamespace(
+        client=SimpleNamespace(next_prompt=provider),
+    )))
+    monkeypatch.setattr(chat, "generate_next_prompt", chat_service.generate_next_prompt)
+    with connect(http) as ws:
+        ready = open_session(ws)
+        send(ws)
+        accepted(ws)
+        assert started.wait(2)
+    assert cancelled.wait(2)
+    provider.side_effect = None
+    provider.return_value = None
+    with connect(http) as ws:
+        assert open_session(ws, ready["sessionToken"])["history"] == []
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json()["text"] == reply.return_value
 
 def clear_session(ws, token, request_id="clear_1"):
     ws.send_json({"type": "session.clear", "requestId": request_id, "sessionToken": token})
@@ -313,3 +414,85 @@ def test_clear_requires_valid_request_id(client):
         token = open_session(ws)["sessionToken"]
         assert clear_session(ws, token, " ")["code"] == "invalid_message"
         assert clear_session(ws, token)["deleted"] is True
+
+
+def test_clear_removes_saved_next_prompt_and_new_session_does_not_replay_it(client, monkeypatch):
+    http, reply, store = client
+    suggestion = "Які категорії оцінює OKIL?"
+    generate = AsyncMock(return_value=suggestion)
+    monkeypatch.setattr(chat, "generate_next_prompt", generate)
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json()["nextPrompt"] == suggestion
+        assert open_session(ws, token)["history"][0]["nextPrompt"] == suggestion
+
+        assert clear_session(ws, token)["deleted"] is True
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0
+        fresh = open_session(ws)
+        assert fresh["sessionToken"] != token
+        assert fresh["history"] == []
+
+        # Reusing an ID in the new session must generate a fresh answer.
+        send(ws)
+        accepted(ws)
+        assert ws.receive_json()["nextPrompt"] == suggestion
+        assert reply.await_count == 2
+        assert generate.await_count == 2
+        assert reply.await_args.args[1] == []
+        assert generate.await_args.args[2] == []
+
+
+def test_clear_during_next_prompt_cancels_provider_and_discards_turn(client, monkeypatch):
+    http, _, store = client
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    async def pending(*args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    provider = AsyncMock(side_effect=pending)
+    monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=SimpleNamespace(
+        client=SimpleNamespace(next_prompt=provider),
+    )))
+    monkeypatch.setattr(chat, "generate_next_prompt", chat_service.generate_next_prompt)
+    with connect(http) as ws:
+        token = open_session(ws)["sessionToken"]
+        send(ws)
+        accepted(ws)
+        assert started.wait(2)
+        assert clear_session(ws, token)["type"] == "session.cleared"
+        assert cancelled.wait(2)
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0
+        assert open_session(ws)["history"] == []
+        ws.send_json({"type": "session.open", "sessionToken": token})
+        assert ws.receive_json()["code"] == "session_expired"
+    provider.assert_awaited_once()
+
+
+def test_other_socket_clear_during_next_prompt_cannot_restore_deleted_turn(client, monkeypatch):
+    http, _, store = client
+    started = threading.Event()
+    release = asyncio.Event()
+
+    async def pending(*args, **kwargs):
+        started.set()
+        await release.wait()
+        return "Які категорії оцінює OKIL?"
+
+    monkeypatch.setattr(chat, "generate_next_prompt", AsyncMock(side_effect=pending))
+    with connect(http) as first, connect(http) as second:
+        token = open_session(first)["sessionToken"]
+        open_session(second, token)
+        send(first)
+        accepted(first)
+        assert started.wait(2)
+        assert clear_session(second, token)["deleted"] is True
+        http.portal.call(release.set)
+        assert first.receive_json()["code"] == "session_expired"
+        assert http.portal.call(store.redis.exists, store._key(token)) == 0

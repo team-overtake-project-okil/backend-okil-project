@@ -3,6 +3,7 @@ from typing import Any
 import httpx
 
 from app.config import settings
+from app.request_timing import timed_stage
 from app.mobility_transport import LVIV_CENTER, mobility_modes
 
 HERE_ROUTING_URL = "https://router.hereapi.com/v8/routes"
@@ -33,11 +34,13 @@ async def get_here_routes(
                 ),
                 **({"modes": "bus"} if is_transit else {"transportMode": "car"}),
             }
-            response = await client.get(
-                HERE_TRANSIT_URL if is_transit else HERE_ROUTING_URL,
-                params=params,
-            )
-            response.raise_for_status()
+            with timed_stage("here.http") as timing:
+                response = await client.get(
+                    HERE_TRANSIT_URL if is_transit else HERE_ROUTING_URL,
+                    params=params,
+                )
+                timing["http_status"] = response.status_code
+                response.raise_for_status()
             mode_routes = response.json().get("routes", [])
             if is_transit:
                 mode_routes = [

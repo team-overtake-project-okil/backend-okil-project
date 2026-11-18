@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.config import settings
+from app.request_timing import timed_stage
 from app.mobility_transport import LVIV_CENTER, mobility_modes
 
 TRAVELTIME_URL = "https://api.traveltimeapp.com/v4/h3"
@@ -87,12 +88,14 @@ async def get_mobility_scores(
                 for index, departure in enumerate(departures)
             ]
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    TRAVELTIME_URL,
-                    headers=headers,
-                    json={"resolution": 9, "departure_searches": searches, "properties": ["mean"]},
-                )
-                response.raise_for_status()
+                with timed_stage("traveltime.http") as timing:
+                    response = await client.post(
+                        TRAVELTIME_URL,
+                        headers=headers,
+                        json={"resolution": 9, "departure_searches": searches, "properties": ["mean"]},
+                    )
+                    timing["http_status"] = response.status_code
+                    response.raise_for_status()
                 full_score_seconds = (
                     settings.TRAVELTIME_BUS_FULL_SCORE_SECONDS
                     if mode == "bus"

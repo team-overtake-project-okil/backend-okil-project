@@ -4,7 +4,7 @@
 Запускати ПІСЛЯ load_gtfs.py: скрипт бере зупинки й маршрути, які вже лежать у БД
 (source = easyway), і будує для них стиснуті сегменти за shapes.txt.
 
-    python -m app.scripts.load_segments data/static.zip [--dry-run]
+    python -m app.jobs.load_segments data/static.zip [--dry-run]
 """
 import asyncio
 import csv
@@ -163,18 +163,10 @@ async def main(zip_path: str, dry_run: bool = False):
     route_id_map = {ext: db_id for db_id, ext in route_rows}
 
     if not stop_id_map or not route_id_map:
-        print("Error: у БД немає зупинок/маршрутів EasyWay. Спочатку запустіть load_gtfs.py.")
-        return
+        raise ValueError("У БД немає зупинок/маршрутів EasyWay. Спочатку запустіть load_gtfs.py")
 
     # 2. Парсинг архіву
-    try:
-        data = parse_archive(zip_path, set(stop_id_map), set(route_id_map))
-    except FileNotFoundError:
-        print(f"Error: File not found at {zip_path}")
-        return
-    except (zipfile.BadZipFile, KeyError) as e:
-        print(f"Error: некоректний GTFS-архів ({e!r})")
-        return
+    data = parse_archive(zip_path, set(stop_id_map), set(route_id_map))
 
     print(f"План: segments={len(data['segments'])} "
           f"segment_links={len(data['segment_links'])} "
@@ -182,8 +174,7 @@ async def main(zip_path: str, dry_run: bool = False):
 
     # ЗАХИСТ: якщо сегментів немає, старі не чіпаємо.
     if not data["segments"] or not data["segment_links"]:
-        print("Error: не вдалося побудувати сегменти. Імпорт скасовано, старі дані збережено.")
-        return
+        raise ValueError("Не вдалося побудувати сегменти. Імпорт скасовано, старі дані збережено")
 
     if dry_run:
         print("--dry-run: БД не чіпав.")
