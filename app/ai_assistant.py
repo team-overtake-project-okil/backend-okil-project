@@ -3,7 +3,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.category_narratives.config import CATEGORY_NAMES
@@ -11,7 +11,7 @@ from app.category_narratives.config import TYPE_NAMES
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
 from app.hexagon_repository import fetch_hexagon
-from app.models import Point, PointType, Stop
+from app.models import HexTable, Point, PointType, Stop
 from app.schemas import HexagonWeights
 from app.scoring import calculate_category_ratings, calculate_overall_rating
 from app.intent_classifier import Intent
@@ -228,14 +228,41 @@ async def get_poi_information(
     db: AsyncSession,
     h3_id: str,
 ) -> dict[str, Any]:
+    point_type_result = await db.execute(
+        select(PointType.type, PointType.radius_of_influence_1)
+        .order_by(PointType.type)
+    )
+    point_type_radii = {
+        row["type"]: row["radius_of_influence_1"]
+        for row in point_type_result.mappings().all()
+    }
+    if not point_type_radii:
+        return {
+            "h3_id": h3_id,
+            "objects": [],
+            "total_returned": 0,
+            "truncated": False,
+        }
+    radius_for_point_type = case(point_type_radii, value=Point.type)
+    radius_for_stop_type = case(point_type_radii, value=Stop.type)
+
     point_result = await db.execute(
         select(
             Point.name.label("name"),
             Point.type.label("type"),
             PointType.category.label("category"),
         )
+        .select_from(Point)
         .join(PointType, Point.type == PointType.type)
-        .where(cast(Point.h3_id, String) == h3_id)
+        .join(HexTable, cast(HexTable.h3_id, String) == h3_id)
+        .where(Point.type.in_(point_type_radii))
+        .where(
+            func.ST_DWithin(
+                HexTable.geom,
+                Point.geom,
+                radius_for_point_type,
+            )
+        )
         .order_by(Point.type, Point.name)
         .limit(POI_LIMIT + 1)
     )
@@ -245,8 +272,17 @@ async def get_poi_information(
             Stop.type.label("type"),
             PointType.category.label("category"),
         )
+        .select_from(Stop)
         .join(PointType, Stop.type == PointType.type)
-        .where(cast(Stop.h3_id, String) == h3_id)
+        .join(HexTable, cast(HexTable.h3_id, String) == h3_id)
+        .where(Stop.type.in_(point_type_radii))
+        .where(
+            func.ST_DWithin(
+                HexTable.geom,
+                Stop.geom,
+                radius_for_stop_type,
+            )
+        )
         .order_by(Stop.type, Stop.name)
         .limit(POI_LIMIT + 1)
     )

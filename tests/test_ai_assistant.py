@@ -89,6 +89,12 @@ def test_get_hex_information_returns_none_when_hex_is_missing(monkeypatch):
 def test_get_poi_information_reads_points_and_stops():
     db = FakeDatabase(
         [
+            FakeResult(
+                [
+                    {"type": "cafe", "radius_of_influence_1": 450.0},
+                    {"type": "gtfs_stop", "radius_of_influence_1": 200.0},
+                ]
+            ),
             FakeResult([{"name": "Кафе", "type": "cafe", "category": "food"}]),
             FakeResult(
                 [
@@ -111,7 +117,11 @@ def test_get_poi_information_reads_points_and_stops():
     assert result["objects"][0]["category_name"] == "Харчування"
     assert result["objects"][0]["type_name"] == "Кафе"
     assert result["truncated"] is False
-    assert len(db.statements) == 2
+    assert len(db.statements) == 3
+    assert "ST_DWithin" in str(db.statements[1])
+    assert "ST_DWithin" in str(db.statements[2])
+    assert "CASE" in str(db.statements[1])
+    assert "CASE" in str(db.statements[2])
 
 
 def test_format_poi_answer_reports_no_stops_when_database_has_none():
