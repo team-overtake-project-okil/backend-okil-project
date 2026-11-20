@@ -1,17 +1,19 @@
 import json
+import re
+from heapq import nlargest
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, cast, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.category_narratives.config import CATEGORY_NAMES
 from app.category_narratives.config import TYPE_NAMES
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
-from app.hexagon_repository import fetch_hexagon
-from app.models import HexTable, Point, PointType, Stop, Route, RouteSegment, StopRouteConnectable
+from app.hexagon_repository import fetch_hexagon, fetch_hexagons
+from app.models import HexTable, Point, PointType, Stop, Route, StopRouteConnectable
 from app.schemas import HexagonWeights
 from app.scoring import calculate_category_ratings, calculate_overall_rating
 from app.intent_classifier import Intent
@@ -392,61 +394,35 @@ async def get_top_hexagons_information(
     db: AsyncSession,
     limit: int = 5,
 ) -> dict[str, Any]:
-    total_base_score = (
-        HexTable.health
-        + HexTable.study
-        + HexTable.daily
-        + HexTable.sport
-        + HexTable.enjoyment
-        + HexTable.food
-        + HexTable.security
-    )
-    result = await db.execute(
-        select(cast(HexTable.h3_id, String))
-        .where(
-            HexTable.health > 0,
-            HexTable.study > 0,
-            HexTable.daily > 0,
-            HexTable.sport > 0,
-            HexTable.enjoyment > 0,
-            HexTable.food > 0,
-            HexTable.security > 0,
-        )
-        .order_by(total_base_score.desc())
-        .limit(limit * 3)
-    )
-    candidate_ids = list(result.scalars().all())
+    hexagons = await fetch_hexagons(db)
     weights = HexagonWeights().model_dump()
-
-    mobility_map: dict[str, float] = {}
-    if candidate_ids and getattr(settings, "EXTERNAL_TRANSPORT_ENABLED", True):
+    mobility_scores: dict[str, float] = {}
+    if hexagons and settings.EXTERNAL_TRANSPORT_ENABLED:
         try:
-            mobility_map = await get_mobility_scores(candidate_ids)
-        except Exception:
+            mobility_scores = await get_mobility_scores([cell["h3_id"] for cell in hexagons])
+        except (RuntimeError, httpx.HTTPError):
             weights["mobility"] = 0.0
     else:
         weights["mobility"] = 0.0
 
-    scored_hexes: list[dict[str, Any]] = []
-    for cand_id in candidate_ids:
-        hexagon = await fetch_hexagon(db, cand_id)
-        if hexagon is None:
-            continue
-        if cand_id in mobility_map:
-            hexagon["mobility"] = round(mobility_map[cand_id])
-        overall = calculate_overall_rating(hexagon, weights)
-        scored_hexes.append(
-            {
-                "h3_id": hexagon["h3_id"],
-                "overall_rating": overall,
-                "categories": calculate_category_ratings(hexagon, weights),
-            }
+    scored = (
+        (calculate_overall_rating(cell, weights), cell)
+        for cell in (
+            {**hexagon, "mobility": mobility_scores.get(hexagon["h3_id"], 0.0)}
+            for hexagon in hexagons
         )
-
-    scored_hexes.sort(key=lambda item: item["overall_rating"], reverse=True)
+    )
+    leaders = nlargest(limit, scored, key=lambda item: item[0])
     return {
-        "top_hexagons": scored_hexes[:limit],
-        "total_evaluated": len(scored_hexes),
+        "top_hexagons": [
+            {
+                "h3_id": cell["h3_id"],
+                "overall_rating": rating,
+                "categories": calculate_category_ratings(cell, weights),
+            }
+            for rating, cell in leaders
+        ],
+        "total_evaluated": len(hexagons),
     }
 
 
@@ -457,31 +433,39 @@ def extract_simulated_weights(question: str) -> dict[str, float]:
         "mobility": ("мобільн", "транспорт", "зупинк", "маршрут"),
         "daily": ("щоден", "потреб", "магазин", "супермаркет", "аптек"),
         "health": ("здоров", "лікарн", "медиц", "поліклінік"),
-        "education": ("освіт", "школ", "садоч", "навчальн"),
-        "leisure": ("дозвілл", "парк", "відпочин", "розваг", "кіно"),
+        "study": ("освіт", "школ", "садоч", "навчальн"),
+        "enjoyment": ("дозвілл", "парк", "відпочин", "розваг", "кіно"),
         "sport": ("спорт", "тренув", "стадіон", "майданчик"),
         "food": ("їж", "харчув", "кав", "ресторан", "кафе"),
-        "safety": ("безпек", "укритт", "сховищ"),
+        "security": ("безпек", "укритт", "сховищ"),
     }
-    mentioned = {
-        cat_id
-        for cat_id, stems in keyword_map.items()
-        if any(stem in q_lower for stem in stems)
-    }
-    if not mentioned:
-        return weights
+    clauses = re.split(
+        r"[,;]\s*(?=(?:збільш|зменш|вимкн|прибер|постав|увімкн))"
+        r"|\s+(?:і|й|та|а|або)\s+(?=(?:збільш|зменш|вимкн|прибер|постав|увімкн))",
+        q_lower,
+    )
+    for clause in clauses:
+        mentioned = {
+            category for category, stems in keyword_map.items()
+            if any(re.search(rf"\b{stem}", clause) for stem in stems)
+        }
+        if not mentioned:
+            continue
 
-    only_mode = any(w in q_lower for w in ("тільки", "лише", "виключно"))
-    disable_mode = any(w in q_lower for w in ("вимкн", "без ", "прибер", "не важли"))
-
-    for cat_id in weights:
-        if only_mode:
-            weights[cat_id] = 1.0 if cat_id in mentioned else 0.0
-        elif disable_mode and cat_id in mentioned:
-            weights[cat_id] = 0.0
-        elif cat_id in mentioned:
-            weights[cat_id] = 1.0
+        if any(word in clause for word in ("тільки", "лише", "виключно")):
+            weights = {category: float(category in mentioned) for category in weights}
+            continue
+        for category in mentioned:
+            if any(word in clause for word in ("вимкн", "без ", "прибер", "не важли", "не врахов")):
+                weights[category] = 0.0
+            elif "максимум" in clause:
+                weights[category] = 5.0
+            elif any(word in clause for word in ("зменш", "менш важли", "нижч")):
+                weights[category] = 0.5
+            else:
+                weights[category] = 2.0
     return weights
+
 
 async def get_transit_lines_information(
     db: AsyncSession,
@@ -561,12 +545,18 @@ async def get_infrastructure_gaps_information(
     db: AsyncSession,
     h3_id: str,
 ) -> dict[str, Any] | None:
-    overview = await get_hex_overview_information(db, h3_id)
-    if overview is None:
+    hex_info = await get_hex_information(db, h3_id)
+    if hex_info is None:
         return None
     all_types_result = await db.execute(select(PointType.type, PointType.category))
     all_types = [dict(r) for r in all_types_result.mappings().all()]
-    present_types = {obj["type"] for obj in overview["objects"]}
+    present_types_result = await db.execute(
+        union(
+            select(Point.type).where(cast(Point.h3_id, String) == h3_id),
+            select(Stop.type).where(cast(Stop.h3_id, String) == h3_id),
+        )
+    )
+    present_types = set(present_types_result.scalars().all())
 
     missing_by_category: dict[str, list[str]] = {}
     for pt in all_types:
@@ -575,10 +565,13 @@ async def get_infrastructure_gaps_information(
             type_name = TYPE_NAMES.get(pt["type"], pt["type"])
             missing_by_category.setdefault(cat_name, []).append(type_name)
 
-    weak_categories = sorted(overview["categories"], key=lambda c: c["score"])[:3]
+    weak_categories = sorted(
+        (category for category in hex_info["categories"] if category["enabled"]),
+        key=lambda category: category["score"],
+    )[:3]
     return {
         "h3_id": h3_id,
-        "overall_rating": overview["overall_rating"],
+        "overall_rating": hex_info["overall_rating"],
         "weakest_categories": weak_categories,
         "missing_object_types_in_hex": missing_by_category,
     }

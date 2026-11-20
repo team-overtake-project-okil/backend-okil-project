@@ -15,6 +15,10 @@ NEXT_PROMPT_TIMEOUT_SECONDS = 3.0
 MAX_NEXT_PROMPT_LENGTH = 240
 UNRELATED_REPLY = "Я допомагаю з питаннями про OKIL, оцінки ділянок і місця в них. Уточніть запитання."
 H3_ID_PATTERN = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{15}(?![0-9a-fA-F])")
+HEX_CONTEXT_INTENTS = frozenset({
+    "poi", "hex_score", "hex_overview", "mobility_routes",
+    "weights_simulation", "transit_lines", "neighborhood_context", "infrastructure_gaps",
+})
 logger = logging.getLogger(__name__)
 UI_CONTEXT_PREFIX = re.compile(
     r"\AДілянка Львова \(H3: [0-9a-fA-F]{15}\)\. Оцінка комфорту: [^\n]*"
@@ -111,7 +115,12 @@ class ChatAIService:
         # Product FAQs can be misclassified as POI/score by the embedding model.
         # Apply identical corrections to answers and candidate follow-up questions.
         parts = [
-            (part.text, self._explicit_intent(part.text) or part.match.intent)
+            (
+                part.text,
+                (self._explicit_intent(part.text) or part.match.intent)
+                if part.match.intent.value in {"poi", "hex_score", "project_info"}
+                else part.match.intent,
+            )
             for part in parsed.relevant_parts
         ]
         parts.extend((part, intent) for part in parsed.unrelated_parts
@@ -127,7 +136,9 @@ class ChatAIService:
             return False
         parts = self._resolved_parts(parsed)
         return bool(parts) and all(
-            intent is not None and (cell is not None or intent.value not in {"poi", "hex_score"})
+            intent is not None
+            and intent.value != "out_of_scope"
+            and (cell is not None or intent.value not in HEX_CONTEXT_INTENTS)
             for _, intent in parts
         )
 
@@ -150,19 +161,7 @@ class ChatAIService:
                 merged_parts.append((part_text, intent))
         parts = merged_parts
 
-        needs_hex = any(
-            intent.value in {
-                "poi", 
-                "hex_score", 
-                "hex_overview", 
-                "mobility_routes", 
-                "weights_simulation",
-                "transit_lines",          
-                "neighborhood_context",   
-                "infrastructure_gaps"
-            }
-            for _, intent in parts
-        )
+        needs_hex = any(intent.value in HEX_CONTEXT_INTENTS for _, intent in parts)
         cell = hex_context(text, history) if needs_hex else None
         if needs_hex and cell is None:
             raise ChatReplyError(

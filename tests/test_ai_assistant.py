@@ -1,5 +1,6 @@
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -20,6 +21,9 @@ from app.intent_classifier import Intent
 class FakeResult:
     def __init__(self, rows):
         self._rows = rows
+
+    def scalars(self):
+        return self
 
     def mappings(self):
         return self
@@ -63,6 +67,7 @@ def test_get_hex_information_returns_score_and_explanations(monkeypatch):
             for category in weights
         }
 
+    monkeypatch.setattr(ai_assistant.settings, "EXTERNAL_TRANSPORT_ENABLED", False)
     monkeypatch.setattr(ai_assistant, "fetch_hexagon", fetch_hexagon)
     monkeypatch.setattr(
         ai_assistant,
@@ -510,3 +515,65 @@ def test_groq_next_prompt_uses_bounded_context_and_optional_json(monkeypatch, pa
         "question": "Що таке OKIL?", "answer": "а" * 8000, "h3_id": None,
         "recent_questions": ["q1", "q2", "q3"], "previous_suggestions": ["s1", "s2", "s3"],
     }
+
+
+
+@pytest.mark.parametrize(("question", "changes", "only"), [
+    ("Врахуй тільки освіту", {"study": 1.0}, True),
+    ("Вимкни безпеку й дозвілля", {"security": 0.0, "enjoyment": 0.0}, False),
+    ("Збільш важливість транспорту і вимкни їжу", {"mobility": 2.0, "food": 0.0}, False),
+    ("Постав освіту на максимум", {"study": 5.0}, False),
+])
+def test_simulated_weights_use_scoring_categories(question, changes, only):
+    expected = ai_assistant.HexagonWeights().model_dump()
+    if only:
+        expected = dict.fromkeys(expected, 0.0)
+    expected.update(changes)
+
+    assert ai_assistant.extract_simulated_weights(question) == expected
+
+
+def test_top_hexagons_uses_final_rating_for_every_candidate(monkeypatch):
+    monkeypatch.setattr(ai_assistant.settings, "EXTERNAL_TRANSPORT_ENABLED", False)
+    categories = ("health", "study", "daily", "sport", "enjoyment", "food", "security")
+    high_sum = dict.fromkeys(categories, 100) | {"security": 1}
+    balanced = dict.fromkeys(categories, 80)
+    rows = [
+        {"h3_id": str(index), **high_sum} for index in range(15)
+    ] + [{"h3_id": "balanced", **balanced}]
+    db = FakeDatabase([FakeResult(rows)])
+
+    result = asyncio.run(ai_assistant.get_top_hexagons_information(db))
+
+    assert result["total_evaluated"] == 16
+    assert result["top_hexagons"][0]["h3_id"] == "balanced"
+    assert result["top_hexagons"][0]["overall_rating"] == 80
+    assert len(db.statements) == 1
+
+
+def test_infrastructure_gaps_use_all_point_and_stop_types(monkeypatch):
+    monkeypatch.setattr(ai_assistant, "get_hex_information", AsyncMock(return_value={
+        "overall_rating": 80,
+        "categories": [
+            {"category": "mobility", "score": 0, "enabled": False},
+            {"category": "study", "score": 50, "enabled": True},
+        ],
+    }))
+    db = FakeDatabase([
+        FakeResult([
+            {"type": "school", "category": "study"},
+            {"type": "gtfs_stop", "category": "mobility"},
+            {"type": "cafe", "category": "food"},
+        ]),
+        FakeResult(["school", "gtfs_stop"]),
+    ])
+
+    result = asyncio.run(ai_assistant.get_infrastructure_gaps_information(db, "891e76c6db3ffff"))
+
+    assert result["missing_object_types_in_hex"] == {
+        ai_assistant.CATEGORY_NAMES["food"]: [ai_assistant.TYPE_NAMES["cafe"]],
+    }
+    assert [item["category"] for item in result["weakest_categories"]] == ["study"]
+    type_query = str(db.statements[1])
+    assert "UNION" in type_query
+    assert "LIMIT" not in type_query
