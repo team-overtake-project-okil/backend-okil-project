@@ -1,4 +1,4 @@
-from pydantic import PositiveInt
+from pydantic import PositiveFloat, PositiveInt, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     SERPAPI_KEYS: str = ""
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-20b"
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_API_TOKEN: SecretStr = SecretStr("")
+    EMBEDDING_API_TIMEOUT_SECONDS: PositiveFloat = 10.0
     EXTERNAL_TRANSPORT_ENABLED: bool = True
     TRAVELTIME_API_KEY: str = ""
     TRAVELTIME_APP_ID: str = ""

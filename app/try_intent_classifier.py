@@ -15,8 +15,12 @@ async def main() -> None:
     except ValueError as error:
         print(error)
         return
-    print("Завантажую модель класифікації...")
-    classifier = await create_default_intent_classifier()
+    print("Ініціалізую BGE-M3-класифікатор...")
+    try:
+        classifier = await create_default_intent_classifier()
+    except (ValueError, RuntimeError) as error:
+        print(f"Не вдалося ініціалізувати класифікатор: {error}")
+        return
     print("Модель готова. Введи питання; для виходу натисни Ctrl+C або Ctrl+Z.")
 
     while True:
@@ -29,7 +33,11 @@ async def main() -> None:
         if not query:
             continue
 
-        parsed = await classifier.parse_query(query)
+        try:
+            parsed = await classifier.parse_query(query)
+        except RuntimeError as error:
+            print(f"Не вдалося класифікувати запит: {error}")
+            continue
         if parsed.relevant_parts:
             print("Розпізнані частини:")
             for part in parsed.relevant_parts:
@@ -74,11 +82,7 @@ async def main() -> None:
                 intent = part.match.intent
                 if intent is None:
                     continue
-                if intent is not Intent.POI:
-                    print(
-                        f"\nЗвертаюсь до PostgreSQL та Groq "
-                        f"[{intent.value}]..."
-                    )
+                groq.last_used_model = None
                 try:
                     answer = await answer_intent(
                         db,
@@ -86,11 +90,12 @@ async def main() -> None:
                         part.text,
                         intent,
                         h3_id,
+                        query_embedding=part.match.embedding,
                     )
                 except (RuntimeError, ValueError) as error:
                     print(f"Не вдалося отримати відповідь: {error}")
                     continue
-                if intent is not Intent.POI:
+                if groq.last_used_model:
                     print(f"Groq model: {groq.last_used_model}")
                 print(f"AI> {answer}")
 

@@ -1,4 +1,4 @@
-"""Embed curated Markdown with MiniLM and import it into existing ai_knowledge."""
+"""Embed curated Markdown with Cloudflare BGE-M3 and import it into existing ai_knowledge."""
 
 import argparse
 import asyncio
@@ -9,11 +9,17 @@ import re
 from pathlib import Path
 
 from app.export_ai_knowledge import DEFAULT_SOURCE, parse_knowledge_markdown
-from app.intent_classifier import (
-    DEFAULT_EMBEDDING_MODEL,
-    EMBEDDING_DIMENSIONS,
-    SentenceTransformerEmbedder,
+from app.embedding_api import (
+    EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EmbeddingAPIError, create_embedder,
 )
+
+# Bound each input conservatively using UTF-8 bytes. Keep the full content
+# through multiple windows and aggregate their normalized embeddings.
+MAX_WINDOW_BYTES = 2048
+
+
+def embedding_input_size(text):
+    return len(text.encode("utf-8"))
 
 
 def split_embedding_text(text, token_count, max_tokens):
@@ -43,7 +49,7 @@ async def embed_records(records, embed_text, token_count, max_tokens):
         for window in windows:
             vector = tuple(float(value) for value in await embed_text(window))
             if len(vector) != EMBEDDING_DIMENSIONS or not all(map(math.isfinite, vector)):
-                raise ValueError("Expected a finite 384-dimensional embedding")
+                raise ValueError("Expected a finite 1024-dimensional embedding")
             norm = math.sqrt(math.fsum(value * value for value in vector))
             if not norm:
                 raise ValueError("Embedding must not be a zero vector")
@@ -60,10 +66,10 @@ async def embed_records(records, embed_text, token_count, max_tokens):
             "embedding": [value / norm for value in mean],
             "metadata": {
                 **record["metadata"],
-                "embedding_model": DEFAULT_EMBEDDING_MODEL,
+                "embedding_model": EMBEDDING_MODEL,
                 "embedding_dimensions": EMBEDDING_DIMENSIONS,
-                "embedding_strategy": "normalized_mean_windows_v1",
-                "embedding_max_tokens": max_tokens,
+                "embedding_strategy": "normalized_mean_utf8_windows_v1",
+                "embedding_max_utf8_bytes": max_tokens,
                 "embedding_windows": len(windows),
                 "content_sha256": hashlib.sha256(record["content"].encode("utf-8")).hexdigest(),
             },
@@ -94,7 +100,7 @@ def write_records(connection, records):
             )
             row = cursor.fetchone()
             if row is None or row[0] != f"vector({EMBEDDING_DIMENSIONS})":
-                raise ValueError("ai_knowledge.embedding must be vector(384); no rows written")
+                raise ValueError("ai_knowledge.embedding must be vector(1024); run the knowledge migration first")
             # The table has no unique document/chunk constraint. Cooperating
             # importers serialize writes for this document in the transaction.
             cursor.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (document_id,))
@@ -142,18 +148,8 @@ async def run(args):
     print(f"Validated {len(records)} Markdown sections.")
     if args.validate_only:
         return
-    print(f"Loading {DEFAULT_EMBEDDING_MODEL}; the first run may download model files.")
-    embedder = await asyncio.to_thread(SentenceTransformerEmbedder)
-    model = embedder._model
-    max_tokens = model.max_seq_length
-    if not isinstance(max_tokens, int) or max_tokens <= 0:
-        raise ValueError("The model must specify a positive max_seq_length")
     prepared = await embed_records(
-        records, embedder,
-        lambda text: len(model.tokenizer.encode(
-            text, add_special_tokens=True, truncation=False, verbose=False,
-        )),
-        max_tokens,
+        records, create_embedder(), embedding_input_size, MAX_WINDOW_BYTES,
     )
     print(f"Created {len(prepared)} normalized {EMBEDDING_DIMENSIONS}-dimensional vectors.")
     if not args.apply:
@@ -192,7 +188,7 @@ def main():
     except Exception as error:
         # Driver exceptions may contain connection details: keep credentials
         # and database response bodies out of CLI output.
-        message = str(error) if isinstance(error, ValueError) else type(error).__name__
+        message = str(error) if isinstance(error, (ValueError, EmbeddingAPIError)) else type(error).__name__
         parser.exit(1, f"Import failed: {message}\n")
 
 

@@ -8,7 +8,6 @@ from app.intent_classifier import (
     INTENT_DESCRIPTIONS,
     Intent,
     IntentClassifier,
-    SentenceTransformerEmbedder,
 )
 
 
@@ -225,45 +224,3 @@ def test_parse_query_keeps_one_intent_even_with_conjunction():
     assert [part.text for part in result.relevant_parts] == [query]
     assert result.relevant_parts[0].match.intent is Intent.POI
     assert result.unrelated_parts == ()
-
-
-def test_sentence_transformer_embedder_uses_multilingual_model(monkeypatch):
-    class FakeSentenceTransformer:
-        def __init__(self, model_name):
-            assert model_name == "paraphrase-multilingual-MiniLM-L12-v2"
-
-        def get_embedding_dimension(self):
-            return EMBEDDING_DIMENSIONS
-
-        def encode(self, text, *, convert_to_numpy, normalize_embeddings):
-            assert text == "питання"
-            assert convert_to_numpy is True
-            assert normalize_embeddings is True
-            return [0.0] * EMBEDDING_DIMENSIONS
-
-    monkeypatch.setattr(
-        "app.intent_classifier._load_sentence_transformer",
-        FakeSentenceTransformer,
-    )
-    embedder = SentenceTransformerEmbedder()
-
-    embedding = asyncio.run(embedder("питання"))
-
-    assert len(embedding) == EMBEDDING_DIMENSIONS
-
-
-def test_sentence_transformer_embedder_rejects_unexpected_dimensions(monkeypatch):
-    class FakeSentenceTransformer:
-        def __init__(self, model_name):
-            pass
-
-        def get_embedding_dimension(self):
-            return 3
-
-    monkeypatch.setattr(
-        "app.intent_classifier._load_sentence_transformer",
-        FakeSentenceTransformer,
-    )
-
-    with pytest.raises(ValueError, match="Expected 384-dimensional"):
-        SentenceTransformerEmbedder()

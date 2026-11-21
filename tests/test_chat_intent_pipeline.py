@@ -52,7 +52,7 @@ def make_classifier():
 CONTEXTS = {
     Intent.POI: {"h3_id": CELL, "objects": [{"name": "Аптека", "type": "pharmacy"}], "total_returned": 1},
     Intent.HEX_SCORE: {"h3_id": CELL, "overall_rating": 72, "categories": []},
-    Intent.PROJECT_INFO: {"project": "OKIL", "categories": [], "point_types": []},
+    Intent.PROJECT_INFO: {"project": "OKIL", "knowledge_fragments": ["Довідка про Окіл."]},
 }
 
 
@@ -146,7 +146,9 @@ def test_h3_scoped_services_receive_the_database_session_and_cell(pipeline):
 
 def test_project_question_needs_no_h3_context(pipeline):
     assert pipeline.reply("Розкажи про проєкт") == "AI:project_info"
-    pipeline.services[Intent.PROJECT_INFO].assert_awaited_once_with(pipeline.db)
+    pipeline.services[Intent.PROJECT_INFO].assert_awaited_once_with(
+        pipeline.db, tuple(one_hot(INTENT_AXIS[Intent.PROJECT_INFO])),
+    )
 
 
 def test_h3_context_can_come_from_an_earlier_question(pipeline):

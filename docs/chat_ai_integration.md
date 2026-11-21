@@ -14,14 +14,14 @@ At implementation time, its reviewed head was
 For the assembled local project, the integration initially included copies of
 `app/ai_assistant.py` and `app/intent_classifier.py` from that exact revision.
 Issue #86 extends `GroqClient` with optional next-prompt generation and preserves
-the upstream classifier and knowledge configuration.
+the classifier interface and knowledge configuration.
 The current classifier descriptions and their scenario encoding are documented in
 [intent_classification.md](intent_classification.md). The current main also has
 the `ai_knowledge` vector model; curated text export is documented in
-[ai_knowledge_ingestion.md](ai_knowledge_ingestion.md). That export does not yet
-add retrieval to `get_project_information`.
-`sentence-transformers` is included in requirements. Lazy initialization
-still returns `ai_unavailable` when a deployment lacks the model or key.
+[ai_knowledge_ingestion.md](ai_knowledge_ingestion.md). Project-info answers now use up to three indexed knowledge fragments.
+The chat reuses the classifier's query embedding for retrieval.
+Issue #97 uses 1024-dimensional BGE-M3 embeddings via Cloudflare Workers AI.
+See [embedding setup and database migration](embedding_setup.md).
 
 With the dependencies available, install the combined requirements, configure
 the existing DB and Redis, and add a Groq key to the backend environment:
@@ -29,18 +29,17 @@ the existing DB and Redis, and add a Groq key to the backend environment:
 ```dotenv
 GROQ_API_KEY=your_local_key
 GROQ_MODEL=openai/gpt-oss-20b
+CLOUDFLARE_ACCOUNT_ID=your_account_id
+CLOUDFLARE_API_TOKEN=your_workers_ai_token
 ```
 
 Keep actual keys out of Git and logs. Redis/session settings remain unchanged.
 The classifier is initialized lazily once per process and reused. A failed
-initialization can be retried. The first load may download the upstream
-Sentence Transformers model; a cold start can exceed the existing 30-second
-reply deadline. Set `CHAT_PRELOAD_AI=true` to load the classifier during
-startup, before the server accepts requests. This optional setting is enabled
-in the local assembly and defaults to false elsewhere. It does not call Groq
-or write to the database. If initialization fails, other endpoints can still
-start and a subsequent chat request may retry. Model files must be cached or
-downloadable before startup completes.
+initialization can be retried. In API mode, batched requests encode all
+intent scenarios; no local model is loaded. `CHAT_PRELOAD_AI=true` moves those
+requests to startup. It does not call Groq or write to the database. A failed
+preload leaves non-chat endpoints available, and a later chat request may retry.
+Historical verification sections below describe the original local-model setup.
 
 The actual assistant UI is now merged in frontend main via PR #105. The
 frontend integration branch starts at `ef79e0b` and uses:
@@ -247,7 +246,7 @@ For an existing Ubuntu/WSL Redis installation, start it with
 `wsl -d Ubuntu -u root -- service redis-server start`. The first model download
 and load took about 38 seconds, so preload keeps this outside the reply budget.
 Install `requirements.txt` into the same environment used to run Uvicorn;
-both `sentence-transformers` and `websockets` must be installed for the live flow.
+`websockets` is required. The current embedding setup uses Cloudflare Workers AI.
 
 Controlled integration also used the unchanged service/classifier modules from
 PR #69 and the unchanged React `Chat.tsx` from PR #95. The actual component was

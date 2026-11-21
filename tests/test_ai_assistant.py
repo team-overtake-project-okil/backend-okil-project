@@ -156,27 +156,58 @@ def test_format_poi_answer_handles_empty_hex():
     assert answer == "У гексі 891e76c6db3ffff у базі не знайдено POI або зупинок."
 
 
-def test_get_project_information_reads_category_point_type_catalog():
-    db = FakeDatabase(
-        [
-            FakeResult(
-                [
-                    {
-                        "type": "cafe",
-                        "category": "food",
-                        "radius_of_influence_1": 500.0,
-                        "radius_of_influence_2": 1000.0,
-                        "radius_of_influence_3": 1500.0,
-                    }
-                ]
-            )
-        ]
+def test_get_project_information_selects_only_relevant_knowledge_text():
+    from sqlalchemy.dialects import postgresql
+
+    db = FakeDatabase([FakeResult([{"text": "Радіуси визначають дистанційний бал."}])])
+    vector = [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
+    result = asyncio.run(get_project_information(db, vector))
+
+    assert result["knowledge_fragments"] == ["Радіуси визначають дистанційний бал."]
+    assert "point_types" not in result
+    compiled = db.statements[0].compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert sql.startswith("SELECT ai_knowledge.content AS text")
+    assert "ORDER BY ai_knowledge.embedding <=>" in sql
+    assert " LIMIT " in " ".join(sql.split())
+    assert vector == compiled.params["knowledge_query"]
+    assert ai_assistant.EMBEDDING_MODEL in compiled.params.values()
+    assert ai_assistant.PROJECT_KNOWLEDGE_LIMIT in compiled.params.values()
+
+
+@pytest.mark.parametrize("question", ["Що таке окіл", "Що таке проєкт OKIL?", "Що це за Окіл?"])
+def test_project_definition_uses_verified_overview_without_db_or_groq(question):
+    result = asyncio.run(answer_intent(object(), object(), question, Intent.PROJECT_INFO))
+
+    assert "мапа міської інфраструктури Львова" in result
+    assert "за власними пріоритетами" in result
+
+
+def test_project_methodology_question_passes_retrieved_text_to_groq():
+    class Client:
+        async def answer(self, question, intent, context):
+            assert intent is Intent.PROJECT_INFO
+            assert context["knowledge_fragments"] == ["Перший радіус дає максимальний бал типу."]
+            return "Пояснення радіусів"
+
+    db = FakeDatabase([FakeResult([{"text": "Перший радіус дає максимальний бал типу."}])])
+    vector = [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
+    result = asyncio.run(
+        answer_intent(db, Client(), "Як працюють радіуси в Околі?", Intent.PROJECT_INFO,
+                      query_embedding=vector)
     )
+    assert result == "Пояснення радіусів"
 
-    result = asyncio.run(get_project_information(db))
 
-    assert result["point_types"][0]["type"] == "cafe"
-    assert any(category["id"] == "food" for category in result["categories"])
+def test_project_info_without_matching_knowledge_skips_groq(monkeypatch):
+    async def embed(question):
+        assert question == "Який бюджет Околу?"
+        return [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
+
+    monkeypatch.setattr(ai_assistant, "create_embedder", lambda: embed)
+    db = FakeDatabase([FakeResult([])])
+    result = asyncio.run(answer_intent(db, object(), "Який бюджет Околу?", Intent.PROJECT_INFO))
+    assert result == ai_assistant.PROJECT_KNOWLEDGE_MISSING
 
 
 def test_groq_sends_context_and_returns_answer(monkeypatch):
