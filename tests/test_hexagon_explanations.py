@@ -124,11 +124,14 @@ def test_detail_endpoint_returns_only_explanation_and_stored_rating(api, monkeyp
     def unexpected_calculation(*args, **kwargs):
         raise AssertionError("Request must not recalculate category scores")
 
-    monkeypatch.setattr(hexagon_router.settings, "HERE_ROUTING_API_KEY", "test-key")
+    monkeypatch.setattr(hexagon_router.settings, "TRAVELTIME_API_KEY", "test-key")
+    monkeypatch.setattr(hexagon_router.settings, "TRAVELTIME_APP_ID", "test-app")
     monkeypatch.setattr(
         hexagon_router,
-        "get_here_routes",
-        AsyncMock(return_value={"routes": []}),
+        "get_traveltime_routes",
+        AsyncMock(return_value={
+            "routes": {"type": "FeatureCollection", "features": []},
+        }),
     )
     monkeypatch.setattr(job, "calculate_distance_score", unexpected_calculation)
     monkeypatch.setattr(job, "get_distance_meters", unexpected_calculation)

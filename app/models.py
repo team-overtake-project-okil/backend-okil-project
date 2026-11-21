@@ -180,6 +180,21 @@ class RouteSegmentLink(Base):
     route = relationship("Route")
 
 
+class RouteSegmentGeometry(Base):
+    __tablename__ = "route_segment_geometries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    route_id = Column(Integer, ForeignKey("routes.id", ondelete="CASCADE"), index=True, nullable=False)
+    sequence_order = Column(Integer, nullable=False)
+    start_stop_id = Column(Integer, ForeignKey("stops.id", ondelete="CASCADE"), index=True, nullable=False)
+    end_stop_id = Column(Integer, ForeignKey("stops.id", ondelete="CASCADE"), index=True, nullable=False)
+    geom = Column(Geography(geometry_type="LINESTRING", srid=4326), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("route_id", "sequence_order", name="uq_route_segment_geometry_order"),
+    )
+
+
 class AIKnowledge(Base):
     __tablename__ = "ai_knowledge"
 

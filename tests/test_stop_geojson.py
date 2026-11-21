@@ -1,90 +1,63 @@
-from app.route_geojson import build_hex_stops_geojson
+from app.route_geojson import (
+    build_hex_stops_geojson,
+    build_traveltime_routes_geojson,
+)
 
 
-def test_one_stop_keeps_each_route_once():
-    collection = build_hex_stops_geojson([
-        {
-            "id": 1,
-            "name": "Вокзал",
-            "lng": 24.0311114,
-            "lat": 49.8397,
-            "in_hex": True,
-            "route_id": 11,
-            "route_name": "А15: Вокзал (191) → Каштанова (268)",
-            "route_external_id": "1006_1",
-        },
-        {
-            "id": 1,
-            "name": "Вокзал",
-            "lng": 24.0311114,
-            "lat": 49.8397,
-            "in_hex": True,
-            "route_id": 11,
-            "route_name": "А15: Вокзал (191) → Каштанова (268)",
-            "route_external_id": "1006_1",
-        },
-        {
-            "id": 1,
-            "name": "Вокзал",
-            "lng": 24.0311114,
-            "lat": 49.8397,
-            "in_hex": True,
-            "route_id": 10,
-            "route_name": "А29: Вокзал (191) → Винники (1022)",
-            "route_external_id": "1014_0",
-        },
-    ])
-
-    assert collection == {
-        "type": "FeatureCollection",
-        "features": [
-            {
-                "type": "Feature",
-                "properties": {
-                    "id": 1,
-                    "name": "Вокзал",
-                    "in_hex": True,
-                    "routes": [
-                        {"id": 10, "number": "А29", "direction": "0"},
-                        {"id": 11, "number": "А15", "direction": "1"},
-                    ],
-                },
-                "geometry": {"type": "Point", "coordinates": [24.031111, 49.8397]},
-            }
+def test_traveltime_route_parts_use_short_transit_label_and_geojson():
+    collection = build_traveltime_routes_geojson([{
+        "transport_mode": "bus",
+        "parts": [
+            {"type": "start_end", "mode": "walk", "coords": [
+                {"lat": 49.8, "lng": 24.0}, {"lat": 49.81, "lng": 24.01},
+            ]},
+            {"type": "public_transport", "mode": "bus", "line": "Bus 6A — Centre",
+             "directions": "Take bus 6A to Centre", "color": "#e63946", "coords": [
+                 {"lat": 49.81, "lng": 24.01}, {"lat": 49.82, "lng": 24.02},
+             ]},
         ],
-    }
+    }])
+
+    walk, bus = collection["features"]
+    assert collection["type"] == "FeatureCollection"
+    assert walk["properties"]["line_style"] == "dashed"
+    assert bus["properties"]["route_number"] == "6A"
+    assert bus["properties"]["label"] == "6A"
+    assert bus["geometry"]["coordinates"] == [[24.01, 49.81], [24.02, 49.82]]
 
 
-def test_stops_outside_the_hex_stay_separate_features():
-    collection = build_hex_stops_geojson([
-        {
-            "id": 2,
-            "name": None,
-            "lng": 24.1,
-            "lat": 49.9,
-            "in_hex": False,
-            "route_id": 10,
-            "route_name": "А29: Початок → Кінець",
-            "route_external_id": "1014_0",
-        },
-        {
-            "id": 3,
-            "name": None,
-            "lng": 24.2,
-            "lat": 49.7,
-            "in_hex": True,
-            "route_id": 10,
-            "route_name": "А29: Початок → Кінець",
-            "route_external_id": "1014_0",
-        },
-    ])
+def test_transit_parts_get_distinct_fallback_colors_and_compact_numbers():
+    collection = build_traveltime_routes_geojson([{
+        "transport_mode": "bus",
+        "parts": [
+            {"type": "public_transport", "mode": "bus", "line": "Bus 47 route", "coords": [
+                {"lat": 49.8, "lng": 24.0}, {"lat": 49.81, "lng": 24.01},
+            ]},
+            {"type": "public_transport", "mode": "bus", "directions": "Take bus 22 to centre", "coords": [
+                {"lat": 49.81, "lng": 24.01}, {"lat": 49.82, "lng": 24.02},
+            ]},
+        ],
+    }])
 
-    features = collection["features"]
-    assert [feature["properties"]["id"] for feature in features] == [2, 3]
-    assert features[0]["properties"]["in_hex"] is False
-    assert features[1]["properties"]["in_hex"] is True
-    assert features[0]["properties"]["name"] is None
+    first, second = collection["features"]
+    assert first["properties"]["label"] == "47"
+    assert second["properties"]["label"] == "22"
+    assert first["properties"]["color"] != second["properties"]["color"]
 
 
-def test_empty_rows_are_an_empty_collection():
+def test_traveltime_geojson_preserves_route_coordinate_precision():
+    collection = build_traveltime_routes_geojson([{
+        "transport_mode": "car",
+        "parts": [{"type": "road", "mode": "car", "coords": [
+            {"lat": 49.810001234, "lng": 24.020009876},
+            {"lat": 49.820001234, "lng": 24.030009876},
+        ]}],
+    }])
+
+    assert collection["features"][0]["geometry"]["coordinates"][0] == [
+        24.02000988, 49.81000123,
+    ]
+
+
+def test_empty_stop_rows_are_an_empty_collection():
     assert build_hex_stops_geojson([]) == {"type": "FeatureCollection", "features": []}

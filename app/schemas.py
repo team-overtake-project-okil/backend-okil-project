@@ -50,7 +50,9 @@ class HexagonDetailResponse(BaseModel):
     h3_id: str
     overall_rating: int = Field(ge=0, le=100)
     categories: list[CategoryRating]
-    routes: list[dict[str, Any]] = Field(default_factory=list)
+    routes: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "FeatureCollection", "features": []}
+    )
 
 # --- PointType ---
 class PointTypeBase(BaseModel):
