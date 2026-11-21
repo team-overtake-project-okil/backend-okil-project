@@ -1,8 +1,9 @@
-"""Response-quality benchmark for the eleven OKIL assistant intents.
+"""Response-quality benchmark for OKIL assistant intents and unrelated requests.
 
 Run with ``python tests/test_ai_benchmark.py`` from the repository root. The
-script uses the configured Groq client and writes JSON plus two SVG charts.
-Uses the project Cloudflare embedding API for classification and scoring.
+script uses the application chat handler, database and AI providers. It writes
+JSON and two SVG charts. Reference answers include historical and synthetic
+facts that may differ from the configured database.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 HEX_ID = "891e768912fffff"
 LEGACY_TOPICS = (
     ("POI", "poi", (
-        (f"Яка категорія має найбільше об’єктів у гексі {HEX_ID}?",
+        ("Яка категорія POI має найбільше об’єктів інфраструктури в обраному гексі?",
          "Найбільше об’єктів у категорії «Харчування» — 18. Наступна категорія — «Щоденні потреби» з 15."),
         (f"Скільки всього POI показано для гекса {HEX_ID}?",
          f"На скриншоті для гекса {HEX_ID} показано 72 POI загалом."),
@@ -54,41 +55,6 @@ LEGACY_TOPICS = (
     )),
 )
 
-SCREENSHOT_COUNTS = [
-    {"category": "daily", "category_name": "Щоденні потреби", "count": 15},
-    {"category": "enjoyment", "category_name": "Дозвілля", "count": 12},
-    {"category": "food", "category_name": "Харчування", "count": 18},
-    {"category": "health", "category_name": "Здоров’я", "count": 9},
-    {"category": "security", "category_name": "Безпека", "count": 3},
-    {"category": "sport", "category_name": "Спорт", "count": 9},
-    {"category": "study", "category_name": "Освіта", "count": 6},
-]
-LEGACY_CONTEXT: dict[str, Any] = {
-    "source": "Показники вручну зчитані зі скриншота користувача.",
-    "hexagon": {"h3_id": HEX_ID, "overall_rating": 82, "rating_scale": "0–100"},
-    "poi_summary": {"total_count": 72, "categories": SCREENSHOT_COUNTS},
-    "category_definitions": {
-        "daily": ["grocery — продуктовий магазин", "supermarket — супермаркет", "pharmacy — аптека", "bank_atm — банк або банкомат", "post_office — пошта"],
-        "enjoyment": ["cinema — кінотеатр", "mall — торговий центр", "museum — музей", "playground — дитячий майданчик"],
-        "food": ["bakery — пекарня", "cafe — кафе", "coffee_shop — кав’ярня", "fast_food — фастфуд", "pub_bar — паб або бар", "restaurant — ресторан"],
-        "health": ["hospital — лікарня", "polyclinic — поліклініка", "dentistry — стоматологія"],
-        "security": ["shelter — укриття"],
-        "sport": ["gym — спортзал", "sport_ground — спортивний майданчик", "stadium — стадіон"],
-        "study": ["school — школа", "kindergarten — дитячий садочок"],
-    },
-    "project_facts": [
-        "Окіл є мапою міської інфраструктури для дослідження місцевості й вибору місця для життя за пріоритетами користувача.",
-        "Гекс є коміркою аналізу H3, а не будинком чи адміністративним районом.",
-        "Вісім категорій Околу: здоров’я, освіта, щоденні потреби, мобільність, спорт, дозвілля, їжа та безпека.",
-        "Бали описують доступність врахованої інфраструктури, а не якість послуг.",
-        "Звичайні POI шукаються по прямій від центру гекса; це не пішохідний маршрут.",
-        "Скриншот показує кількості за категоріями, але не назви окремих місць.",
-    ],
-}
-
-
-LEGACY_INTENTS = {intent for _, intent, _ in LEGACY_TOPICS}
-
 TOPICS = LEGACY_TOPICS + (
     ("hex_overview", "hex_overview", (
         ("Дай загальний огляд цієї ділянки.", "Індекс 82 зі 100. Найсильніша категорія — харчування, найслабша — спорт."),
@@ -110,10 +76,11 @@ TOPICS = LEGACY_TOPICS + (
         ("Перерахуй комфорт лише за харчуванням і спортом у рівних частках.", "За рівних ваг результат становить 65 зі 100."),
         ("Який результат, якщо транспорт для мене єдиний пріоритет?", "За ваги мобільності 100% оцінка дорівнює 80."),
     )),
-    ("out_of_scope", "out_of_scope", (
-        ("Напиши рецепт шоколадного торта.", "Кулінарні рецепти поза тематикою OKIL. Можу допомогти знайти заклади харчування."),
-        ("Як налаштувати гітару?", "Налаштування інструментів поза тематикою OKIL."),
-        ("Хто виграв шаховий турнір?", "Шахові результати поза тематикою платформи міської інфраструктури."),
+    ("unrelated_requests", None, (
+        ("Скажи рецепт сирників.", ""),
+        ("Скажи рецепт сирників і поясни оцінку цього гекса.",
+         "Оцінка цього гекса становить 82 зі 100."),
+        ("Скажи рецепт сирників і підкажи, як налаштувати гітару.", ""),
     )),
     ("transit_lines", "transit_lines", (
         ("Які номери маршрутів проходять через цей гекс?", "У гексі проходять автобус 12 і трамвай 4."),
@@ -132,26 +99,18 @@ TOPICS = LEGACY_TOPICS + (
     )),
 )
 
-# Fixed synthetic snapshot shared by the model and the reference answers.
-BENCHMARK_CONTEXT = {
-    "hexagon": {"h3_id": HEX_ID, "overall_rating": 82},
-    "category_scores": {"health": 85, "study": 86, "daily": 90, "mobility": 80,
-                        "sport": 35, "enjoyment": 81, "food": 95, "security": 45},
-    "gtfs_stops": {"Парк": ["автобус 12"], "Ринок": ["трамвай 4"]},
-    "city_top": [("A", 94), ("B", 90), ("C", 88)],
-    "first_ring_neighbor_scores": [86, 80, 78, 74, 72, 66],
-    "simulation_rule": "Weighted mean of selected category scores.",
-}
-
 def make_cases() -> list[dict[str, Any]]:
     cases = []
+    unrelated_expectations = ([None], [None, "hex_score"], [None, None])
     for group_key, intent, questions in TOPICS:
         for variant, (question, ideal) in enumerate(questions, start=1):
+            expected_parts = unrelated_expectations[variant - 1] if intent is None else None
             cases.append({
                 "id": f"{len(cases) + 1:02d}",
                 "group": group_key,
                 "variant": variant,
-                "intent": intent,
+                "intent": "hex_score" if expected_parts == [None, "hex_score"] else intent,
+                "expected_parts": expected_parts,
                 "question": question,
                 "ideal_answer": ideal,
             })
@@ -252,19 +211,71 @@ def _write_heatmap(path: Path, cases: list[dict[str, Any]], matrix: np.ndarray) 
     path.write_text("\n".join(parts), encoding="utf-8")
 
 
+async def _retry_provider_call(operation, label):
+    for attempt in range(20):
+        try:
+            return await operation()
+        except Exception as error:
+            # The chat handler hides provider details from the user but Python
+            # still keeps the original exception as context.
+            original = error.__cause__ or error.__context__ or error
+            message = str(original)
+            provider_error = re.match(
+                r"(Groq|Cloudflare embedding API) returned HTTP (\d{3})(?=[:.])",
+                message,
+            )
+            status = int(provider_error[2]) if provider_error else None
+            if provider_error:
+                reason = f"{provider_error[1]} HTTP {status}"
+            elif message.startswith(("Groq request failed:", "Cloudflare embedding API request failed.")):
+                reason = "AI provider transport error"
+            elif message.startswith(("Groq returned invalid JSON.", "Groq response must be",
+                                     "Groq response has no", "Groq returned no")):
+                reason = "invalid Groq response"
+            else:
+                reason = type(original).__name__
+
+            transient = (
+                status in {408, 429, 500, 502, 503, 504}
+                or reason == "AI provider transport error"
+                or isinstance(original, TimeoutError)
+            )
+            if not transient or attempt == 19:
+                raise RuntimeError(f"{label} failed ({reason}).") from None
+
+            hint = (
+                re.search(r"try again in (?:(\d+)m\s*)?([0-9.]+)s", message, re.IGNORECASE)
+                if status == 429 else None
+            )
+            delay = (
+                60 * int(hint[1] or 0) + float(hint[2]) + 0.5
+                if hint else min(60, 10 * 2 ** attempt)
+            )
+            print(f"{reason} during {label}. Retrying in {delay:.1f}s.", flush=True)
+            await asyncio.sleep(delay)
+
+
 async def run_benchmark(output_dir: Path) -> dict[str, Any]:
     import numpy as np
 
-    from app.ai_assistant import GroqClient
+    from app.chat_service import (
+        REPLY_TIMEOUT_SECONDS,
+        UNRELATED_REPLY,
+        _get_service,
+        generate_reply,
+    )
     from app.embedding_api import EMBEDDING_MODEL, create_embedder
-    from app.intent_classifier import IntentClassifier
 
     cases = make_cases()
-    groq = GroqClient()
+    for case in cases:
+        if case["intent"] is None:
+            case["ideal_answer"] = UNRELATED_REPLY
+    service = await _retry_provider_call(_get_service, "chat initialization")
     embedder = create_embedder()
-    classifier = await IntentClassifier.create(embedder, embed_many=embedder.embed_many)
+    # Supply the selected map cell as context without changing the query text.
+    history = [{"requestId": "benchmark-context", "question": f"H3: {HEX_ID}", "answer": ""}]
     output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / ".eleven_intents_run_state.json"
+    checkpoint_path = output_dir / ".chat_handler_none_run_state.json"
     checkpoint = (
         json.loads(checkpoint_path.read_text(encoding="utf-8"))
         if checkpoint_path.exists()
@@ -278,31 +289,43 @@ async def run_benchmark(output_dir: Path) -> dict[str, Any]:
             print(f"Using saved answer {index}/{len(cases)}")
             continue
 
-        match = await classifier.classify(case["question"])
-        if match.intent is None:
-            answer = "Класифікатор не визначив підтримуваний тип запиту."
-        else:
-            for attempt in range(20):
-                try:
-                    answer = await groq.answer(
-                        case["question"], match.intent,
-                        LEGACY_CONTEXT if case["intent"] in LEGACY_INTENTS else BENCHMARK_CONTEXT
-                    )
-                    break
-                except RuntimeError as error:
-                    message = str(error)
-                    if "HTTP 429" not in message or attempt == 19:
-                        raise
-                    retry_match = re.search(r"try again in ([0-9.]+)s", message)
-                    delay = min(60.0, float(retry_match.group(1)) + 0.5) if retry_match else 5.0
-                    print(f"Rate limit; waiting {delay:.1f}s before retrying case {case['id']}.")
-                    await asyncio.sleep(delay)
+        answer = await _retry_provider_call(
+            lambda: asyncio.wait_for(
+                generate_reply(case["question"], history), REPLY_TIMEOUT_SECONDS
+            ),
+            f"chat reply for case {case['id']}",
+        )
 
-        saved = {
-            "predicted_intent": match.intent.value if match.intent else "out_of_scope",
-            "classifier_similarity": match.similarity,
-            "ai_answer": answer,
-        }
+        used_unrelated_reply = answer == UNRELATED_REPLY
+        saved = {"used_unrelated_reply": used_unrelated_reply, "ai_answer": answer}
+        if case["expected_parts"] is None:
+            match = await _retry_provider_call(
+                lambda: service.classifier.classify(case["question"]),
+                f"classification for case {case['id']}",
+            )
+            saved.update(
+                predicted_intent=match.intent.value if match.intent is not None else None,
+                classifier_similarity=match.similarity,
+            )
+        else:
+            parsed = await _retry_provider_call(
+                lambda: service.classifier.parse_query(case["question"]),
+                f"classification for case {case['id']}",
+            )
+            relevant = [part.match.intent.value for part in parsed.relevant_parts]
+            # parse_query returns relevant and unrelated parts in separate collections.
+            expected = case["expected_parts"]
+            passed = (
+                relevant == [intent for intent in expected if intent is not None]
+                and len(parsed.unrelated_parts) == expected.count(None)
+                and used_unrelated_reply == (case["intent"] is None)
+            )
+            saved.update(
+                predicted_intent=relevant[0] if len(relevant) == 1 else None,
+                relevant_intents=relevant,
+                unrelated_parts=parsed.unrelated_parts,
+                behavior_passed=passed,
+            )
         checkpoint[case["id"]] = saved
         case.update(saved)
         temporary_path = checkpoint_path.with_suffix(".tmp")
@@ -313,7 +336,10 @@ async def run_benchmark(output_dir: Path) -> dict[str, Any]:
         print(f"Completed answer {index}/{len(cases)}")
     case_texts = [case["ai_answer"] for case in cases]
     ideals = [case["ideal_answer"] for case in cases]
-    vectors = np.asarray(await embedder.embed_many(case_texts + ideals), dtype=float)
+    embeddings = await _retry_provider_call(
+        lambda: embedder.embed_many(case_texts + ideals), "similarity scoring"
+    )
+    vectors = np.asarray(embeddings, dtype=float)
     vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
     answer_vectors = np.asarray(vectors[: len(cases)], dtype=float)
     ideal_vectors = np.asarray(vectors[len(cases) :], dtype=float)
@@ -322,19 +348,28 @@ async def run_benchmark(output_dir: Path) -> dict[str, Any]:
     for case, score in zip(cases, scores):
         case["similarity_to_ideal"] = float(score)
         case["expected_intent"] = case["intent"]
-        case["intent"] = case["intent"]
 
     _write_bar_chart(output_dir / "similarity_by_query.svg", cases, scores)
     _write_heatmap(output_dir / "answer_similarity_matrix.svg", cases, matrix)
     result = {
         "hex_id": HEX_ID,
-        "answer_model": groq.model,
+        "answer_model": service.client.model,
+        "answer_source": "app.chat_service.generate_reply",
+        "reference_note": (
+            "Some references use a historical screenshot or synthetic facts. "
+            "Similarity measures agreement with those references and does not verify "
+            "the correctness of answers against the configured database."
+        ),
         "embedding_model": EMBEDDING_MODEL,
         "case_count": len(cases),
         "mean_similarity": float(np.mean(scores)),
         "intent_accuracy": float(np.mean([
-            case["predicted_intent"] == case["expected_intent"] for case in cases
+            case["predicted_intent"] == case["expected_intent"]
+            for case in cases if case["expected_parts"] is None
         ])),
+        "unrelated_behavior_passed": all(
+            case["behavior_passed"] for case in cases if case["expected_parts"] is not None
+        ),
         "cases": cases,
         "answer_to_ideal_similarity_matrix": matrix.tolist(),
     }
@@ -345,12 +380,15 @@ async def run_benchmark(output_dir: Path) -> dict[str, Any]:
     return result
 
 
-def test_benchmark_contains_three_distinct_queries_for_each_intent() -> None:
+def test_benchmark_contains_three_distinct_queries_for_each_group() -> None:
     cases = make_cases()
-    assert len({topic[1] for topic in TOPICS}) == 11
+    assert len({topic[1] for topic in TOPICS if topic[1] is not None}) == 10
+    assert [case["expected_parts"] for case in cases if case["expected_parts"] is not None] == [
+        [None], [None, "hex_score"], [None, None],
+    ]
     assert len(cases) == 33
     assert all(sum(case["group"] == topic[0] for case in cases) == 3 for topic in TOPICS)
-    assert all(len({case["ideal_answer"] for case in cases if case["group"] == topic[0]}) == 3 for topic in TOPICS)
+    assert all(len({case["ideal_answer"] for case in cases if case["group"] == topic[0]}) == 3 for topic in TOPICS if topic[1] is not None)
     assert len({case["question"] for case in cases}) == 33
 
 
@@ -367,6 +405,8 @@ def main() -> None:
     result = asyncio.run(run_benchmark(args.output))
     print(f"Completed {result['case_count']} cases; mean similarity: {result['mean_similarity']:.3f}")
     print(f"Charts and results: {args.output.resolve()}")
+    if not result["unrelated_behavior_passed"]:
+        raise SystemExit("One or more unrelated-request scenarios failed. See results.json.")
 
 
 if __name__ == "__main__":
