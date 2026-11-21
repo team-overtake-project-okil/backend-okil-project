@@ -12,7 +12,7 @@ def test_missing_dependency_names_module_and_install_command(monkeypatch, capsys
     from app import import_ai_knowledge
 
     async def missing_dependency(args):
-        raise ModuleNotFoundError("hidden internal error", name="sentence_transformers")
+        raise ModuleNotFoundError("hidden internal error", name="psycopg")
 
     monkeypatch.setattr(import_ai_knowledge, "run", missing_dependency)
     monkeypatch.setattr("sys.argv", ["import_ai_knowledge"])
@@ -20,7 +20,7 @@ def test_missing_dependency_names_module_and_install_command(monkeypatch, capsys
         import_ai_knowledge.main()
     assert error.value.code == 1
     output = capsys.readouterr().err
-    assert "sentence_transformers" in output
+    assert "psycopg" in output
     assert "python -m pip install -r requirements.txt" in output
     assert "hidden internal error" not in output
 
@@ -45,18 +45,18 @@ def test_embedding_uses_every_window_and_records_model_provenance():
 
     async def embed_text(text):
         calls.append(text)
-        return [0.0, 2.0] + [0.0] * 382
+        return [0.0, 2.0] + [0.0] * 1022
 
     prepared = asyncio.run(embed_records([record("word " * 50)], embed_text, len, 40))
     assert len(calls) > 1
     assert prepared[0]["content"] == "word " * 50
-    assert prepared[0]["embedding"] == [0.0, 1.0] + [0.0] * 382
+    assert prepared[0]["embedding"] == [0.0, 1.0] + [0.0] * 1022
     assert prepared[0]["metadata"]["embedding_windows"] == len(calls)
-    assert prepared[0]["metadata"]["embedding_dimensions"] == 384
+    assert prepared[0]["metadata"]["embedding_dimensions"] == 1024
     assert len(prepared[0]["metadata"]["content_sha256"]) == 64
 
 
-@pytest.mark.parametrize("vector", [[0.0] * 384, [1.0] * 3, [float("nan")] * 384])
+@pytest.mark.parametrize("vector", [[0.0] * 1024, [1.0] * 3, [float("nan")] * 1024])
 def test_invalid_embeddings_never_reach_database(vector):
     async def embed_text(text):
         return vector
@@ -66,7 +66,7 @@ def test_invalid_embeddings_never_reach_database(vector):
 
 
 class FakeConnection:
-    def __init__(self, dimension="vector(384)"):
+    def __init__(self, dimension="vector(1024)"):
         self.dimension = dimension
         self.rows = []
         self.result = None
@@ -97,7 +97,7 @@ class FakeConnection:
             if self.fail_insert:
                 raise RuntimeError("simulated write failure")
             category, content, vector, metadata = params
-            assert len(json.loads(vector)) == 384
+            assert len(json.loads(vector)) == 1024
             self.rows.append((len(self.rows) + 1, category, content, json.loads(metadata)))
             self.writes += 1
         elif sql.startswith("UPDATE"):
@@ -118,7 +118,7 @@ class FakeConnection:
 
 
 def prepared(content="Окіл"):
-    return {**record(content), "embedding": [1.0] + [0.0] * 383}
+    return {**record(content), "embedding": [1.0] + [0.0] * 1023}
 
 
 def test_repeat_import_updates_same_row_and_preserves_other_documents():
@@ -134,7 +134,7 @@ def test_repeat_import_updates_same_row_and_preserves_other_documents():
 
 def test_wrong_column_dimension_blocks_all_writes():
     db = FakeConnection("vector(768)")
-    with pytest.raises(ValueError, match=r"vector\(384\)"):
+    with pytest.raises(ValueError, match=r"vector\(1024\)"):
         write_records(db, [prepared()])
     assert db.writes == 0
 

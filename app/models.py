@@ -17,9 +17,10 @@ from geoalchemy2 import Geography
 from pgvector.sqlalchemy import Vector
 
 from app.database import Base
+from app.embedding_api import EMBEDDING_DIMENSIONS
 
 
-AI_EMBEDDING_DIMENSIONS = 384
+AI_EMBEDDING_DIMENSIONS = EMBEDDING_DIMENSIONS
 
 
 class H3IndexType(UserDefinedType):

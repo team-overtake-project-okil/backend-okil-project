@@ -1,16 +1,10 @@
-import asyncio
 import math
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from app.embedding_api import EMBEDDING_DIMENSIONS, create_embedder
 
-if TYPE_CHECKING:
-    from sentence_transformers import SentenceTransformer as SentenceTransformerModel
-
-DEFAULT_EMBEDDING_MODEL = "paraphrase-multilingual-MiniLM-L12-v2"
-EMBEDDING_DIMENSIONS = 384
 DEFAULT_MIN_SIMILARITY = 0.2
 
 
@@ -242,39 +236,12 @@ _QUERY_PART_SEPARATOR = re.compile(
 )
 
 
-def _load_sentence_transformer(model_name: str) -> "SentenceTransformerModel":
-    from sentence_transformers import SentenceTransformer
-
-    return SentenceTransformer(model_name)
-
-
-class SentenceTransformerEmbedder:
-    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
-        self._model = _load_sentence_transformer(model_name)
-        dimensions = self._model.get_embedding_dimension()
-        if dimensions != EMBEDDING_DIMENSIONS:
-            raise ValueError(
-                f"Expected {EMBEDDING_DIMENSIONS}-dimensional embeddings from "
-                f"{model_name}, got {dimensions}"
-            )
-
-    def _encode(self, text: str) -> tuple[float, ...]:
-        embedding = self._model.encode(
-            text,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-        )
-        return tuple(float(value) for value in embedding)
-
-    async def __call__(self, text: str) -> Sequence[float]:
-        return await asyncio.to_thread(self._encode, text)
-
-
 @dataclass(frozen=True)
 class IntentMatch:
     intent: Intent | None
     similarity: float
     scores: Mapping[Intent, float]
+    embedding: tuple[float, ...] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -338,16 +305,29 @@ class IntentClassifier:
         cls,
         embed_text: EmbeddingFunction,
         min_similarity: float | None = DEFAULT_MIN_SIMILARITY,
+        *,
+        embed_many: Callable[[Sequence[str]], Awaitable[Sequence[Sequence[float]]]] | None = None,
     ) -> "IntentClassifier":
         # Encode short scenarios separately: one long description can be
         # truncated by the sentence model, silently losing later use cases.
         # Positive examples avoid embedding other intents through exclusions.
+        scenarios = {
+            intent: tuple(part for part in description.split("\n\n") if part.strip())
+            for intent, description in INTENT_DESCRIPTIONS.items()
+        }
+        texts = [text for parts in scenarios.values() for text in parts]
+        if embed_many is None:
+            encoded = [await embed_text(text) for text in texts]
+        else:
+            encoded = await embed_many(texts)
+        if len(encoded) != len(texts):
+            raise ValueError("An embedding is required for every intent scenario")
+        encoded_iter = iter(encoded)
         embeddings = {}
-        for intent, description in INTENT_DESCRIPTIONS.items():
+        for intent, parts in scenarios.items():
             vectors = [
-                _validated_vector(await embed_text(scenario), label=intent.value)
-                for scenario in description.split("\n\n")
-                if scenario.strip()
+                _validated_vector(next(encoded_iter), label=intent.value)
+                for _ in parts
             ]
             if not vectors or len({len(vector) for vector in vectors}) != 1:
                 raise ValueError("Intent scenarios must have matching embedding dimensions")
@@ -388,7 +368,7 @@ class IntentClassifier:
         ):
             best_intent = None
 
-        return IntentMatch(best_intent, best_similarity, scores)
+        return IntentMatch(best_intent, best_similarity, scores, query_embedding)
 
     async def parse_query(self, query: str) -> ParsedQuery:
         if not query.strip():
@@ -414,5 +394,5 @@ class IntentClassifier:
 async def create_default_intent_classifier(
     min_similarity: float | None = DEFAULT_MIN_SIMILARITY,
 ) -> IntentClassifier:
-    embedder = await asyncio.to_thread(SentenceTransformerEmbedder)
-    return await IntentClassifier.create(embedder, min_similarity)
+    embedder = create_embedder()
+    return await IntentClassifier.create(embedder, min_similarity, embed_many=embedder.embed_many)

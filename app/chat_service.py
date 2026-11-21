@@ -169,11 +169,21 @@ class ChatAIService:
                 "Додайте H3 ID ділянки до запитання про її оцінку або місця.",
             )
 
+        query_embeddings = {
+            part.text: getattr(part.match, "embedding", None)
+            for part in parsed.relevant_parts
+        }
         answers = []
         async with _connected_session(self.session_factory) as db:
             for part_text, intent in parts:
+                query_embedding = query_embeddings.get(part_text)
+                kwargs = (
+                    {"query_embedding": query_embedding}
+                    if intent.value == "project_info" and query_embedding is not None
+                    else {}
+                )
                 answer = await self.answer_intent(
-                    db, self.client, part_text, intent, cell
+                    db, self.client, part_text, intent, cell, **kwargs
                 )
                 if not isinstance(answer, str) or not answer.strip():
                     raise ChatReplyError("ai_failed", "AI-сервіс не повернув текст відповіді. Спробуйте ще раз.")
@@ -186,8 +196,7 @@ _service_lock = asyncio.Lock()
 
 
 async def _create_service() -> ChatAIService:
-    # #69 is a separate PR. Lazy imports keep non-chat endpoints available while
-    # that dependency/model/key is absent; no test answer is used as a fallback.
+    # Lazy imports keep non-chat endpoints available when chat setup is missing.
     try:
         from app.ai_assistant import GroqClient, answer_intent
         from app.database import async_session_maker
@@ -213,7 +222,7 @@ async def _get_service() -> ChatAIService:
 
 
 async def preload_ai() -> None:
-    """Optionally load the local classifier before accepting chat requests."""
+    """Optionally prepare intent vectors before accepting chat requests."""
     try:
         await _get_service()
     except ChatReplyError:

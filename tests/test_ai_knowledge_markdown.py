@@ -218,7 +218,7 @@ def test_text_that_cannot_fit_any_window_is_an_error_not_silent_truncation():
 # --- embeddings ------------------------------------------------------------------------
 
 
-def one_hot(axis, size=384):
+def one_hot(axis, size=1024):
     vector = [0.0] * size
     vector[axis] = 3.0
     return vector
@@ -243,13 +243,13 @@ def test_each_record_gets_a_unit_vector_of_the_database_dimension_and_keeps_its_
     assert [item["metadata"]["chunk_id"] for item in prepared] == ["okil.a", "okil.b"]
     assert [item["content"] for item in prepared] == ["Перший", "Другий текст"]
     for item in prepared:
-        assert len(item["embedding"]) == 384
+        assert len(item["embedding"]) == 1024
         assert math.sqrt(sum(value * value for value in item["embedding"])) == pytest.approx(1.0)
-        assert item["metadata"]["embedding_dimensions"] == 384
+        assert item["metadata"]["embedding_dimensions"] == 1024
     assert records == originals, "embedding must not mutate the parsed records"
 
 
-@pytest.mark.parametrize("size", [0, 1, 383, 385, 1536])
+@pytest.mark.parametrize("size", [0, 1, 1023, 1025, 1536])
 def test_embedding_of_the_wrong_dimension_is_rejected(size):
     async def embed_text(text):
         return [1.0] * size
@@ -276,7 +276,7 @@ def test_all_windows_of_a_long_record_contribute_to_its_single_embedding():
 
 def test_windows_weigh_equally_regardless_of_the_length_of_their_raw_vectors():
     async def embed_text(text):
-        vector = [0.0] * 384
+        vector = [0.0] * 1024
         vector[0 if text == "початок" else 1] = 1000.0 if text == "початок" else 1.0
         return vector
 
@@ -293,7 +293,7 @@ def test_windows_weigh_equally_regardless_of_the_length_of_their_raw_vectors():
 class FakeKnowledgeTable:
     """Minimal stand-in for the psycopg connection ``write_records`` expects."""
 
-    def __init__(self, dimension="vector(384)"):
+    def __init__(self, dimension="vector(1024)"):
         self.dimension = dimension
         self.rows = []
         self.writes = 0
@@ -323,7 +323,7 @@ class FakeKnowledgeTable:
             self.result = [row for row in self.rows if row[3]["document_id"] == params[0]]
         elif sql.startswith("INSERT"):
             category, content, vector, metadata = params
-            assert len(json.loads(vector)) == 384
+            assert len(json.loads(vector)) == 1024
             self.rows.append((len(self.rows) + 1, category, content, json.loads(metadata)))
             self.writes += 1
         elif sql.startswith("UPDATE"):
@@ -345,7 +345,7 @@ class FakeKnowledgeTable:
 def indexed(chunk_id="okil.a", content="Текст", document_id="okil", **metadata):
     item = record(chunk_id, content, document_id)
     item["metadata"].update(metadata)
-    return {**item, "embedding": [1.0] + [0.0] * 383}
+    return {**item, "embedding": [1.0] + [0.0] * 1023}
 
 
 def test_reindexing_an_unchanged_document_writes_nothing():
@@ -407,7 +407,7 @@ def test_a_batch_must_describe_exactly_one_document_with_unique_chunks():
 
 def test_cosine_similarity_query_matches_the_hnsw_index_operator_class():
     """No search endpoint exists yet; this guards the query the index is built for."""
-    query = select(AIKnowledge.content).order_by(AIKnowledge.embedding.cosine_distance([0.1] * 384)).limit(3)
+    query = select(AIKnowledge.content).order_by(AIKnowledge.embedding.cosine_distance([0.1] * 1024)).limit(3)
     sql = str(query.compile(dialect=postgresql.dialect()))
     (index,) = [index for index in AIKnowledge.__table__.indexes if index.name == "ix_ai_knowledge_embedding_hnsw"]
 

@@ -103,29 +103,8 @@ python -m app.export_ai_knowledge --output okil_knowledge.jsonl
 See [ingestion instructions](docs/ai_knowledge_ingestion.md) for the record format,
 embedding dimensions and the remaining retrieval integration.
 
-The `ai_knowledge` table stores text fragments and their 384-dimensional
-embeddings in PostgreSQL with pgvector. It is intended for searchable reference
-content about the project. Its `category` column is an optional topic label; it
-does not classify user questions. `metadata` is JSONB for optional source and
-future fields. Embeddings stored in this table must have 384 dimensions, generated
-with `paraphrase-multilingual-MiniLM-L12-v2` for both documents and search queries.
-
-For existing databases, verify that the embedding column is `vector(384)`
-through a write-enabled database connection before importing vectors.
-`create_all` does not alter an existing column. Regenerate incompatible existing
-vectors from their source texts rather than truncating or padding them.
-
-Import Markdown directly with local MiniLM embeddings using the configured
-`DB_URL` from `.env`:
-
-```powershell
-python -m app.import_ai_knowledge --validate-only
-python -m app.import_ai_knowledge --apply
-```
-
-Without `--apply`, the importer only creates embeddings and does not connect to
-the DB. Repeated imports update existing document/chunk IDs without duplicates;
-unrelated records and removed topics are not deleted automatically.
+The knowledge table stores 1024-dimensional BGE-M3 vectors. See the
+[Cloudflare setup and database migration](docs/embedding_setup.md).
 
 The API enables the PostgreSQL `vector` extension at startup, so the database
 server must have pgvector installed.
@@ -133,9 +112,8 @@ server must have pgvector installed.
 ## AI intent classifier
 
 `app.intent_classifier` classifies questions as `poi`, `hex_score`, or
-`project_info` using the multilingual
-`paraphrase-multilingual-MiniLM-L12-v2` Sentence Transformers model. Create
-the default classifier once during application startup, then reuse it:
+`project_info` using Cloudflare Workers AI BGE-M3. See the
+[setup guide](docs/embedding_setup.md) for credentials. Create the classifier once, then reuse it:
 
 ```python
 from app.intent_classifier import create_default_intent_classifier
@@ -145,13 +123,13 @@ match = await classifier.classify("Що означає оцінка цього �
 print(match.intent, match.similarity)
 ```
 
-The model produces 384-dimensional embeddings for intent classification.
-The `ai_knowledge` table uses the same 384-dimensional model for document and
+The model produces 1024-dimensional embeddings for intent classification.
+The `ai_knowledge` table uses the same 1024-dimensional model for document and
 search-query embeddings. Intent centroids describe request topics, not knowledge
 fragments; generate a separate embedding for each document fragment.
 
 `INTENT_DESCRIPTIONS` contains short, positive scenarios for each intent. At
-initialization each scenario is encoded separately, normalized, and averaged into
+initialization scenarios are encoded as separate inputs in API batches, normalized, and averaged into
 one intent vector so later scenarios are not lost by encoding a long description
 as a single input. Existing cosine scoring and the `0.2` threshold are preserved.
 See [intent boundaries and evaluation cases](docs/intent_classification.md).
@@ -176,7 +154,7 @@ The tester reports Groq API errors, including rate limits, rather than
 returning an incomplete answer. The API key is sent only to Groq and must not
 be committed.
 
-The first launch loads the local intent model. Enter questions to see
+The first launch fetches scenario embeddings from the API. Enter questions to see
 recognized project-related parts and parts that are ignored. For example,
 `поясни оцінку цього гекса і дай рецепт сирників` separates the hex-score
 question from the unrelated recipe request. For POI and hex-score questions,
@@ -295,7 +273,7 @@ for context limits and validation.
 The chat adapter uses the AI classifier and `answer_intent` service from
 [PR #69](https://github.com/team-overtake-project-okil/backend-okil-project/pull/69).
 The AI modules originated in that PR, with optional next-prompt generation added
-in #86; their Python dependencies, intent model and `GROQ_API_KEY` must be configured.
+in #86; their Python dependencies, `CLOUDFLARE_API_TOKEN` and `GROQ_API_KEY` must be configured.
 Until then the socket returns a
 readable `ai_unavailable` error; it never substitutes a test reply.
 See [chat AI integration](docs/chat_ai_integration.md) for setup, context,
