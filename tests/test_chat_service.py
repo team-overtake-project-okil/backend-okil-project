@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy.exc import InterfaceError
 
 from app import chat_service
+from app.intent_classifier import Intent as AssistantIntent
 from app.chat_service import ChatAIService, ChatReplyError, hex_context
 
 CELL = h3.latlng_to_cell(49.84, 24.03, 9)
@@ -413,6 +414,8 @@ def test_category_faq_correction_does_not_override_cell_or_place_questions(quest
 @pytest.mark.parametrize("intent, cell, expected", [
     (Intent.POI, None, None),
     (Intent.SCORE, None, None),
+    (AssistantIntent.TRANSIT_LINES, None, None),
+    (AssistantIntent.OUT_OF_SCOPE, CELL, None),
     (Intent.POI, CELL, "Які місця є в цій ділянці?"),
 ])
 def test_next_prompt_requiring_missing_context_is_omitted(monkeypatch, intent, cell, expected):
@@ -442,3 +445,15 @@ def test_suggestion_classifier_failure_does_not_discard_main_answer(monkeypatch)
     service.client = SimpleNamespace(next_prompt=AsyncMock(return_value="Які категорії оцінює OKIL?"))
     monkeypatch.setattr(chat_service, "_get_service", AsyncMock(return_value=service))
     assert asyncio.run(chat_service.generate_next_prompt("Що таке OKIL?", "Опис", [])) is None
+
+
+
+def test_weight_simulation_is_not_overridden_by_score_faq():
+    question = "Поясни оцінку цього гекса лише за освітою"
+    intent = AssistantIntent.WEIGHTS_SIMULATION
+    service, answer, db = backend([part(question, intent)])
+    service.score_intent = Intent.SCORE
+
+    asyncio.run(service.reply(question, [turn(CELL)]))
+
+    answer.assert_awaited_once_with(db, service.client, question, intent, CELL)

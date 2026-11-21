@@ -3,6 +3,7 @@ import re
 import sys
 
 from app.ai_assistant import GroqClient, answer_intent
+from app.chat_service import HEX_CONTEXT_INTENTS
 from app.database import async_session_maker
 from app.intent_classifier import Intent, create_default_intent_classifier
 
@@ -65,7 +66,7 @@ async def main() -> None:
 
         h3_id = None
         if any(
-            part.match.intent in (Intent.POI, Intent.HEX_SCORE)
+            part.match.intent.value in HEX_CONTEXT_INTENTS
             for part in parsed.relevant_parts
         ):
             h3_match = H3_ID_PATTERN.search(query)

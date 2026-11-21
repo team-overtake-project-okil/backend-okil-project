@@ -11,12 +11,16 @@ from app.intent_classifier import (
 )
 
 
-def make_classifier(query_embedding, *, min_similarity=DEFAULT_MIN_SIMILARITY):
-    vectors = {
-        Intent.POI: [1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 1),
-        Intent.HEX_SCORE: [0.0, 1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 2),
-        Intent.PROJECT_INFO: [0.0, 0.0, 1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 3),
+def intent_test_vectors():
+    # Give each intent a separate axis, including those unrelated to a test.
+    return {
+        intent: [float(axis == index) for axis in range(EMBEDDING_DIMENSIONS)]
+        for index, intent in enumerate(Intent)
     }
+
+
+def make_classifier(query_embedding, *, min_similarity=DEFAULT_MIN_SIMILARITY):
+    vectors = intent_test_vectors()
 
     async def embed_text(text):
         if text == "питання користувача":
@@ -126,12 +130,18 @@ def test_create_preserves_later_scenarios_and_normalizes_each(monkeypatch):
         Intent.POI: "first scenario\n\nlast scenario",
         Intent.HEX_SCORE: "score scenario",
         Intent.PROJECT_INFO: "project scenario",
+        **{
+            intent: "extra scenario"
+            for intent in Intent
+            if intent not in {Intent.POI, Intent.HEX_SCORE, Intent.PROJECT_INFO}
+        },
     })
     vectors = {
         "first scenario": [100.0, 0.0, 0.0],
         "last scenario": [0.0, 1.0, 0.0],
         "score scenario": [-1.0, 0.0, 0.0],
         "project scenario": [0.0, 0.0, 1.0],
+        "extra scenario": [0.0, 0.0, -1.0],
         "query about last scenario": [0.0, 1.0, 0.0],
     }
 
@@ -166,12 +176,7 @@ def test_parse_query_separates_supported_and_unrelated_parts():
         unrelated_text: [-1.0, -1.0, -1.0]
         + [0.0] * (EMBEDDING_DIMENSIONS - 3),
     }
-    intent_vectors = {
-        Intent.POI: [1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 1),
-        Intent.HEX_SCORE: [0.0, 1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 2),
-        Intent.PROJECT_INFO: [0.0, 0.0, 1.0]
-        + [0.0] * (EMBEDDING_DIMENSIONS - 3),
-    }
+    intent_vectors = intent_test_vectors()
 
     async def embed_text(text):
         if text in query_vectors:
@@ -200,12 +205,7 @@ def test_parse_query_separates_supported_and_unrelated_parts():
 def test_parse_query_keeps_one_intent_even_with_conjunction():
     query = "де знайти кафе і магазини біля гекса"
     vector = [1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 1)
-    intent_vectors = {
-        Intent.POI: vector,
-        Intent.HEX_SCORE: [0.0, 1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 2),
-        Intent.PROJECT_INFO: [0.0, 0.0, 1.0]
-        + [0.0] * (EMBEDDING_DIMENSIONS - 3),
-    }
+    intent_vectors = intent_test_vectors()
 
     async def embed_text(text):
         if text == query:
