@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -462,3 +463,50 @@ def test_answer_intent_returns_empty_poi_result_without_calling_llm(monkeypatch)
     )
 
     assert "не знайдено POI або зупинок" in answer
+
+
+@pytest.mark.parametrize("payload, expected", [
+    ({"next_prompt": "Які категорії оцінює OKIL?"}, "Які категорії оцінює OKIL?"),
+    ({"next_prompt": None}, None), ({}, None), ([], None),
+    ({"next_prompt": {"text": "Питання?"}}, None),
+])
+def test_groq_next_prompt_uses_bounded_context_and_optional_json(monkeypatch, payload, expected):
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(payload)}}]}
+
+    class FakeClient:
+        def __init__(self, *, timeout):
+            assert timeout == 3.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, *, headers, json):
+            assert url == GROQ_CHAT_COMPLETIONS_URL
+            requests.append(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai_assistant.httpx, "AsyncClient", FakeClient)
+    groq = GroqClient("test-key", "test-model")
+    groq.last_used_model = "main-answer-model"
+    result = asyncio.run(groq.next_prompt(
+        "Що таке OKIL?", "а" * 9000, None,
+        ["old", "q1", "q2", "q3"], ["old", "s1", "s2", "s3"],
+    ))
+    assert result == expected
+    assert groq.last_used_model == "main-answer-model"
+    body = requests[0]
+    assert body["model"] == "test-model"
+    assert body["max_completion_tokens"] == ai_assistant.NEXT_PROMPT_MAX_TOKENS
+    assert json.loads(body["messages"][1]["content"]) == {
+        "question": "Що таке OKIL?", "answer": "а" * 8000, "h3_id": None,
+        "recent_questions": ["q1", "q2", "q3"], "previous_suggestions": ["s1", "s2", "s3"],
+    }

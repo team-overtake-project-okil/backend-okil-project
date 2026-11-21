@@ -4,7 +4,7 @@
 Запускати ПІСЛЯ load_gtfs.py: скрипт бере зупинки й маршрути, які вже лежать у БД
 (source = easyway), і будує для них стиснуті сегменти за shapes.txt.
 
-    python -m app.scripts.load_segments data/static.zip [--dry-run]
+    python -m app.jobs.load_segments data/static.zip [--dry-run]
 """
 import asyncio
 import csv
@@ -158,9 +158,6 @@ async def main(
     dry_run: bool = False,
     route_geometries_only: bool = False,
 ):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-
     # 1. Що вже є в БД (після load_gtfs.py)
     async with async_session_maker() as session:
         stop_rows = (await session.execute(
@@ -174,18 +171,10 @@ async def main(
     route_id_map = {ext: db_id for db_id, ext in route_rows}
 
     if not stop_id_map or not route_id_map:
-        print("Error: у БД немає зупинок/маршрутів EasyWay. Спочатку запустіть load_gtfs.py.")
-        return
+        raise ValueError("У БД немає зупинок/маршрутів EasyWay. Спочатку запустіть load_gtfs.py")
 
     # 2. Парсинг архіву
-    try:
-        data = parse_archive(zip_path, set(stop_id_map), set(route_id_map))
-    except FileNotFoundError:
-        print(f"Error: File not found at {zip_path}")
-        return
-    except (zipfile.BadZipFile, KeyError) as e:
-        print(f"Error: некоректний GTFS-архів ({e!r})")
-        return
+    data = parse_archive(zip_path, set(stop_id_map), set(route_id_map))
 
     print(f"План: segments={len(data['segments'])} "
           f"segment_links={len(data['segment_links'])} "
@@ -193,14 +182,16 @@ async def main(
 
     # ЗАХИСТ: якщо сегментів немає, старі не чіпаємо.
     if not data["segments"] or not data["segment_links"] or not data["route_geometries"]:
-        print("Error: не вдалося побудувати сегменти. Імпорт скасовано, старі дані збережено.")
-        return
+        raise ValueError("Не вдалося побудувати сегменти. Імпорт скасовано, старі дані збережено")
 
     if dry_run:
         print("--dry-run: БД не чіпав.")
         return
 
     # 3. Запис
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     route_geometry_rows = [
         {
             "route_id": route_id_map[route_ext_id],

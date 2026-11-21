@@ -10,6 +10,8 @@ import app.traveltime_routes_service as route_service
 
 
 class FakeResponse:
+    status_code = 200
+
     def __init__(self, payload):
         self.payload = payload
 
