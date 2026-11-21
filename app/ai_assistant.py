@@ -1,26 +1,32 @@
 import json
+import re
+from heapq import nlargest
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, cast, select, union
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.category_narratives.config import CATEGORY_NAMES
 from app.category_narratives.config import TYPE_NAMES
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
-from app.hexagon_repository import fetch_hexagon
-from app.models import Point, PointType, Stop
+from app.hexagon_repository import fetch_hexagon, fetch_hexagons
+from app.models import HexTable, Point, PointType, Stop, Route, StopRouteConnectable
 from app.schemas import HexagonWeights
 from app.scoring import calculate_category_ratings, calculate_overall_rating
 from app.intent_classifier import Intent
+from app.mobility_score_service import get_mobility_scores
 
 GROQ_CHAT_COMPLETIONS_URL = "https://api.groq.com/openai/v1/chat/completions"
 SYSTEM_PROMPT = (
     "Ти помічник проєкту OKIL, який пояснює дані про гекси, місця та проєкт. "
     "Відповідай українською, одразу дай відповідь на запит, потім коротко наведи "
     "лише потрібні факти. Не переписуй весь JSON і не починай з довгого вступу. "
+    "НІКОЛИ не створюй великі таблиці з багатьма колонками для списків гексів чи об'єктів. "
+    "Замість таблиць використовуй зручні марковані списки (bullet points), де коротко вказуй ID ділянки, "
+    "загальний бал та ключові переваги, оскільки вікно чату вузьке. "
     "У відповідях про POI пиши природно й цікаво: згрупуй реальні місця за "
     "зрозумілим типом або категорією та назви їх. Не вигадуй, чим займається "
     "заклад, його послуги, якість чи інші подробиці, якщо цього немає в даних. "
@@ -211,11 +217,23 @@ async def get_hex_information(
     if hexagon is None:
         return None
 
+    if getattr(settings, "EXTERNAL_TRANSPORT_ENABLED", True):
+        try:
+            mobility_scores = await get_mobility_scores([h3_id])
+            if h3_id in mobility_scores:
+                hexagon["mobility"] = round(mobility_scores[h3_id])
+        except Exception:
+            pass
+
     weights = dict(user_weights) if user_weights is not None else HexagonWeights().model_dump()
+    if "mobility" not in hexagon:
+        weights["mobility"] = 0.0
+
     explanations = await fetch_hexagon_explanations(db, hexagon, weights)
     categories = calculate_category_ratings(hexagon, weights)
     for category in categories:
-        category["explanation"] = explanations[category["category"]]["explanation"]
+        if category["category"] in explanations:
+            category["explanation"] = explanations[category["category"]]["explanation"]
 
     return {
         "h3_id": hexagon["h3_id"],
@@ -328,6 +346,235 @@ async def get_project_information(db: AsyncSession) -> dict[str, Any]:
         "point_types": point_types,
     }
 
+async def get_hex_overview_information(
+    db: AsyncSession,
+    h3_id: str,
+    user_weights: Mapping[str, float] | None = None,
+) -> dict[str, Any] | None:
+    hex_info = await get_hex_information(db, h3_id, user_weights)
+    if hex_info is None:
+        return None
+    poi_info = await get_poi_information(db, h3_id)
+    return {
+        "h3_id": h3_id,
+        "overall_rating": hex_info["overall_rating"],
+        "categories": hex_info["categories"],
+        "objects": poi_info["objects"],
+        "total_objects_returned": poi_info["total_returned"],
+        "truncated": poi_info["truncated"],
+    }
+
+
+async def get_mobility_information(
+    db: AsyncSession,
+    h3_id: str,
+) -> dict[str, Any] | None:
+    hex_info = await get_hex_information(db, h3_id)
+    if hex_info is None:
+        return None
+    poi_info = await get_poi_information(db, h3_id)
+    stops = [obj for obj in poi_info["objects"] if obj["type"] == "gtfs_stop"]
+    mobility_category = next(
+        (cat for cat in hex_info["categories"] if cat["category"] == "mobility"),
+        None,
+    )
+    return {
+        "h3_id": h3_id,
+        "mobility_score_details": mobility_category,
+        "stops_in_hex": stops,
+        "stops_count": len(stops),
+        "ui_feature_hint": (
+            "Для візуалізації ліній маршрутів на карті увімкніть перемикач "
+            "«Маршрути транспорту» у верхній панелі інтерфейсу."
+        ),
+    }
+
+
+async def get_top_hexagons_information(
+    db: AsyncSession,
+    limit: int = 5,
+) -> dict[str, Any]:
+    hexagons = await fetch_hexagons(db)
+    weights = HexagonWeights().model_dump()
+    mobility_scores: dict[str, float] = {}
+    if hexagons and settings.EXTERNAL_TRANSPORT_ENABLED:
+        try:
+            mobility_scores = await get_mobility_scores([cell["h3_id"] for cell in hexagons])
+        except (RuntimeError, httpx.HTTPError):
+            weights["mobility"] = 0.0
+    else:
+        weights["mobility"] = 0.0
+
+    scored = (
+        (calculate_overall_rating(cell, weights), cell)
+        for cell in (
+            {**hexagon, "mobility": mobility_scores.get(hexagon["h3_id"], 0.0)}
+            for hexagon in hexagons
+        )
+    )
+    leaders = nlargest(limit, scored, key=lambda item: item[0])
+    return {
+        "top_hexagons": [
+            {
+                "h3_id": cell["h3_id"],
+                "overall_rating": rating,
+                "categories": calculate_category_ratings(cell, weights),
+            }
+            for rating, cell in leaders
+        ],
+        "total_evaluated": len(hexagons),
+    }
+
+
+def extract_simulated_weights(question: str) -> dict[str, float]:
+    q_lower = question.lower()
+    weights = HexagonWeights().model_dump()
+    keyword_map = {
+        "mobility": ("мобільн", "транспорт", "зупинк", "маршрут"),
+        "daily": ("щоден", "потреб", "магазин", "супермаркет", "аптек"),
+        "health": ("здоров", "лікарн", "медиц", "поліклінік"),
+        "study": ("освіт", "школ", "садоч", "навчальн"),
+        "enjoyment": ("дозвілл", "парк", "відпочин", "розваг", "кіно"),
+        "sport": ("спорт", "тренув", "стадіон", "майданчик"),
+        "food": ("їж", "харчув", "кав", "ресторан", "кафе"),
+        "security": ("безпек", "укритт", "сховищ"),
+    }
+    clauses = re.split(
+        r"[,;]\s*(?=(?:збільш|зменш|вимкн|прибер|постав|увімкн))"
+        r"|\s+(?:і|й|та|а|або)\s+(?=(?:збільш|зменш|вимкн|прибер|постав|увімкн))",
+        q_lower,
+    )
+    for clause in clauses:
+        mentioned = {
+            category for category, stems in keyword_map.items()
+            if any(re.search(rf"\b{stem}", clause) for stem in stems)
+        }
+        if not mentioned:
+            continue
+
+        if any(word in clause for word in ("тільки", "лише", "виключно")):
+            weights = {category: float(category in mentioned) for category in weights}
+            continue
+        for category in mentioned:
+            if any(word in clause for word in ("вимкн", "без ", "прибер", "не важли", "не врахов")):
+                weights[category] = 0.0
+            elif "максимум" in clause:
+                weights[category] = 5.0
+            elif any(word in clause for word in ("зменш", "менш важли", "нижч")):
+                weights[category] = 0.5
+            else:
+                weights[category] = 2.0
+    return weights
+
+
+async def get_transit_lines_information(
+    db: AsyncSession,
+    h3_id: str,
+) -> dict[str, Any]:
+    result = await db.execute(
+        select(
+            Stop.name.label("stop_name"),
+            Route.name.label("route_name"),
+        )
+        .join(StopRouteConnectable, Stop.id == StopRouteConnectable.stop_id)
+        .join(Route, StopRouteConnectable.route_id == Route.id)
+        .where(Stop.h3_id == h3_id)
+        .distinct()
+        .order_by(Route.name, Stop.name)
+    )
+    rows = [dict(row) for row in result.mappings().all()]
+    unique_routes: set[str] = set()
+    routes_by_stop: dict[str, list[str]] = {}
+    for row in rows:
+        stop_name = row["stop_name"] or "Зупинка без назви"
+        route_name = row["route_name"]
+        unique_routes.add(route_name)
+        routes_by_stop.setdefault(stop_name, []).append(route_name)
+
+    return {
+        "h3_id": h3_id,
+        "total_unique_routes": len(unique_routes),
+        "unique_routes": sorted(unique_routes),
+        "routes_by_stop": routes_by_stop,
+    }
+
+
+async def get_neighborhood_information(
+    db: AsyncSession,
+    h3_id: str,
+) -> dict[str, Any]:
+    import h3
+    neighbor_ids = [nid for nid in h3.grid_disk(h3_id, 1) if nid != h3_id]
+    result = await db.execute(
+        select(
+            cast(HexTable.h3_id, String).label("h3_id"),
+            HexTable.health,
+            HexTable.study,
+            HexTable.daily,
+            HexTable.sport,
+            HexTable.enjoyment,
+            HexTable.food,
+            HexTable.security,
+        ).where(cast(HexTable.h3_id, String).in_(neighbor_ids))
+    )
+    neighbors = [dict(row) for row in result.mappings().all()]
+    poi_result = await db.execute(
+        select(
+            cast(Point.h3_id, String).label("h3_id"),
+            Point.name.label("name"),
+            Point.type.label("type"),
+            PointType.category.label("category"),
+        )
+        .join(PointType, Point.type == PointType.type)
+        .where(cast(Point.h3_id, String).in_(neighbor_ids))
+        .limit(60)
+    )
+    neighbor_pois = [dict(row) for row in poi_result.mappings().all()]
+    for item in neighbor_pois:
+        item["type_name"] = TYPE_NAMES.get(item["type"], item["type"])
+        item["category_name"] = CATEGORY_NAMES.get(item["category"], item["category"])
+
+    return {
+        "center_h3_id": h3_id,
+        "neighbor_hexagons": neighbors,
+        "sample_neighbor_objects": neighbor_pois,
+    }
+
+
+async def get_infrastructure_gaps_information(
+    db: AsyncSession,
+    h3_id: str,
+) -> dict[str, Any] | None:
+    hex_info = await get_hex_information(db, h3_id)
+    if hex_info is None:
+        return None
+    all_types_result = await db.execute(select(PointType.type, PointType.category))
+    all_types = [dict(r) for r in all_types_result.mappings().all()]
+    present_types_result = await db.execute(
+        union(
+            select(Point.type).where(cast(Point.h3_id, String) == h3_id),
+            select(Stop.type).where(cast(Stop.h3_id, String) == h3_id),
+        )
+    )
+    present_types = set(present_types_result.scalars().all())
+
+    missing_by_category: dict[str, list[str]] = {}
+    for pt in all_types:
+        if pt["type"] not in present_types:
+            cat_name = CATEGORY_NAMES.get(pt["category"], pt["category"])
+            type_name = TYPE_NAMES.get(pt["type"], pt["type"])
+            missing_by_category.setdefault(cat_name, []).append(type_name)
+
+    weak_categories = sorted(
+        (category for category in hex_info["categories"] if category["enabled"]),
+        key=lambda category: category["score"],
+    )[:3]
+    return {
+        "h3_id": h3_id,
+        "overall_rating": hex_info["overall_rating"],
+        "weakest_categories": weak_categories,
+        "missing_object_types_in_hex": missing_by_category,
+    }
 
 async def answer_intent(
     db: AsyncSession,
@@ -336,20 +583,63 @@ async def answer_intent(
     intent: Intent,
     h3_id: str | None = None,
 ) -> str:
-    if intent is Intent.HEX_SCORE:
+    if intent == Intent.HEX_SCORE or intent == "hex_score":
         if not h3_id:
             raise ValueError("An H3 ID is required to explain a hexagon rating.")
         context = await get_hex_information(db, h3_id)
         if context is None:
             return f"Гекс {h3_id} не знайдено в базі даних."
-    elif intent is Intent.POI:
+    elif intent == Intent.POI or intent == "poi":
         if not h3_id:
             raise ValueError("An H3 ID is required to look up nearby places.")
         context = await get_poi_information(db, h3_id)
         if not context["objects"]:
             return format_poi_answer(context)
-    elif intent is Intent.PROJECT_INFO:
+    elif intent == Intent.HEX_OVERVIEW or intent == "hex_overview":
+        if not h3_id:
+            raise ValueError("An H3 ID is required for a full hexagon overview.")
+        context = await get_hex_overview_information(db, h3_id)
+        if context is None:
+            return f"Гекс {h3_id} не знайдено в базі даних."
+    elif intent == Intent.MOBILITY_ROUTES or intent == "mobility_routes":
+        if not h3_id:
+            raise ValueError("An H3 ID is required to analyze mobility routes.")
+        context = await get_mobility_information(db, h3_id)
+        if context is None:
+            return f"Гекс {h3_id} не знайдено в базі даних."
+    elif intent == Intent.WEIGHTS_SIMULATION or intent == "weights_simulation":
+        if not h3_id:
+            raise ValueError("An H3 ID is required to simulate custom weights.")
+        custom_weights = extract_simulated_weights(question)
+        context = await get_hex_information(db, h3_id, user_weights=custom_weights)
+        if context is None:
+            return f"Гекс {h3_id} не знайдено в базі даних."
+        context["simulated_weights"] = custom_weights
+    elif intent == Intent.TOP_HEXAGONS or intent == "top_hexagons":
+        context = await get_top_hexagons_information(db)
+    elif intent == Intent.PROJECT_INFO or intent == "project_info":
         context = await get_project_information(db)
+    elif intent == Intent.OUT_OF_SCOPE or intent == "out_of_scope":
+        return (
+            "Проєкт OKIL оцінює міське середовище виключно за 8 інфраструктурними "
+            "категоріями: Мобільність, Щоденні потреби, Здоров'я, Освіта, Дозвілля, "
+            "Спорт, Їжа та Безпека. Дані про вартість нерухомості, паркування, затори, "
+            "велодоріжки чи стан довкілля в системі не розраховуються."
+        )
+    elif intent == Intent.TRANSIT_LINES or intent == "transit_lines":
+        if not h3_id:
+            raise ValueError("An H3 ID is required to check transit lines.")
+        context = await get_transit_lines_information(db, h3_id)
+    elif intent == Intent.NEIGHBORHOOD_CONTEXT or intent == "neighborhood_context":
+        if not h3_id:
+            raise ValueError("An H3 ID is required to check neighborhood context.")
+        context = await get_neighborhood_information(db, h3_id)
+    elif intent == Intent.INFRASTRUCTURE_GAPS or intent == "infrastructure_gaps":
+        if not h3_id:
+            raise ValueError("An H3 ID is required to check infrastructure gaps.")
+        context = await get_infrastructure_gaps_information(db, h3_id)
+        if context is None:
+            return f"Гекс {h3_id} не знайдено в базі даних."
     else:
         raise ValueError(f"Unsupported intent: {intent}")
 
