@@ -3,7 +3,37 @@
 Тут лише чисті функції: без БД і без FastAPI, тому їх легко перевірити окремо.
 """
 import json
+import re
 from collections import defaultdict
+
+TRAVELTIME_TRANSIT_COLORS = (
+    "#2563EB",
+    "#DB2777",
+    "#059669",
+    "#D97706",
+    "#7C3AED",
+    "#0891B2",
+)
+_ROUTE_NUMBER = re.compile(r"(?<![A-Z0-9])(\d{1,3}[A-Z]?)(?![A-Z0-9])", re.IGNORECASE)
+_TRANSIT_NUMBER_IN_DIRECTIONS = re.compile(
+    r"(?:bus|tram|trolleybus|minibus|marshrutka)\s+(\d{1,3}[A-Z]?)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
+
+
+def _short_route_number(part: dict) -> str | None:
+    for key in ("line", "route_number", "route", "name"):
+        value = part.get(key)
+        if value is not None:
+            match = _ROUTE_NUMBER.search(str(value))
+            if match:
+                return match.group(1).upper()
+    directions = part.get("directions")
+    if isinstance(directions, str):
+        match = _TRANSIT_NUMBER_IN_DIRECTIONS.search(directions)
+        if match:
+            return match.group(1).upper()
+    return None
 
 
 def hex_boundary_to_wkt(boundary) -> str:
@@ -32,10 +62,10 @@ def _line_coords(geojson) -> list:
     return []
 
 
-def _extend(target: list, points) -> None:
+def _extend(target: list, points, precision: int = 6) -> None:
     """Додає точки в лінію, пропускаючи дубль на стику двох сегментів."""
     for p in points:
-        pt = [round(p[0], 6), round(p[1], 6)]
+        pt = [round(p[0], precision), round(p[1], precision)]
         if not target or target[-1] != pt:
             target.append(pt)
 
@@ -86,6 +116,71 @@ def build_hex_routes_geojson(routes: list, segment_rows: list, fallback_points: 
             },
             "geometry": {"type": "LineString", "coordinates": coords},
         })
+
+    return {"type": "FeatureCollection", "features": features}
+
+
+def build_traveltime_routes_geojson(routes: list[dict]) -> dict:
+    """Convert TravelTime route parts into separately styled GeoJSON features."""
+    features = []
+    transit_section_index = 0
+    for route_index, route in enumerate(routes):
+        for section_index, section in enumerate(route.get("parts", [])):
+            points = section.get("coords") or []
+            if not points:
+                continue
+            coordinates = []
+            _extend(coordinates, [[point["lng"], point["lat"]] for point in points], precision=8)
+            if len(coordinates) < 2:
+                continue
+
+            section_type = section.get("type", "unknown")
+            mode = section.get("mode") or section_type
+            is_transit = route.get("transport_mode") == "bus" and mode not in {
+                "walk", "walking", "unknown", "pedestrian"
+            }
+            route_number = _short_route_number(section) if is_transit else None
+
+            color = section.get("color")
+            if not (
+                isinstance(color, str)
+                and len(color) == 7
+                and color.startswith("#")
+                and all(char in "0123456789abcdefABCDEF" for char in color[1:])
+            ):
+                if mode in {"walk", "walking", "pedestrian"}:
+                    color = "#6B7280"
+                elif is_transit:
+                    color = TRAVELTIME_TRANSIT_COLORS[
+                        transit_section_index % len(TRAVELTIME_TRANSIT_COLORS)
+                    ]
+                else:
+                    color = "#2563EB"
+
+            properties = {
+                "transport_mode": route.get("transport_mode"),
+                "travel_time_seconds": route.get("travel_time"),
+                "mode": mode,
+                "section_type": section_type,
+                "route_index": route_index,
+                "section_index": section_index,
+                "color": color,
+                "line_style": "dashed" if mode in {"walk", "walking", "pedestrian"} else "solid",
+            }
+            if is_transit:
+                transit_section_index += 1
+                if route_number:
+                    properties["route_number"] = route_number
+                    properties["label"] = route_number
+                headsign = section.get("directions")
+                if isinstance(headsign, str) and headsign.strip():
+                    properties["headsign"] = headsign.strip()
+
+            features.append({
+                "type": "Feature",
+                "properties": properties,
+                "geometry": {"type": "LineString", "coordinates": coordinates},
+            })
 
     return {"type": "FeatureCollection", "features": features}
 
