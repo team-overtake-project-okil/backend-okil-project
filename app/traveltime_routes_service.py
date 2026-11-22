@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, time, timedelta
 import json
 import re
@@ -74,103 +75,107 @@ class TravelTimeRouteFormatError(RuntimeError):
     """Raised when TravelTime returns invalid route geometry."""
 
 
-async def _route_geometry_from_stops(
-    db: AsyncSession,
-    points: list[list[float]],
-    route_number: str,
-) -> list[list[float]] | None:
-    stop_ids: list[int] = []
-    for point in points:
-        if (
-            not isinstance(point, (list, tuple))
-            or len(point) < 2
-            or not isinstance(point[0], (int, float))
-            or not isinstance(point[1], (int, float))
-        ):
-            return None
-        lon, lat = point[0], point[1]
-        result = await db.execute(
-            text("""
-                SELECT id
-                FROM stops
-                WHERE source = 'easyway'
-                  AND ST_DWithin(
-                    geom,
-                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography,
-                    5
-                  )
-                ORDER BY ST_Distance(
-                    geom,
-                    ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography
-                )
-                LIMIT 1
-            """),
-            {"lon": lon, "lat": lat},
+_BUS_GEOMETRY_SQL = text("""
+    WITH points AS MATERIALIZED (
+        SELECT feature_id, point_order, lon, lat
+        FROM jsonb_to_recordset(CAST(:points AS jsonb)) AS input(
+            feature_id integer, point_order integer, lon double precision, lat double precision
         )
-        row = result.first()
-        if row is None:
-            return None
-        if not stop_ids or stop_ids[-1] != row[0]:
-            stop_ids.append(row[0])
-
-    if len(stop_ids) < 2:
-        return None
-
-    coordinates: list[list[float]] = []
-    for start_stop_id, end_stop_id in zip(stop_ids, stop_ids[1:]):
-        result = await db.execute(
-            text("""
-                SELECT ST_AsGeoJSON(g.geom::geometry) AS geojson, r.name AS route_name
-                FROM route_segment_geometries g
-                JOIN routes r ON r.id = g.route_id
-                WHERE g.start_stop_id = :start_stop_id
-                  AND g.end_stop_id = :end_stop_id
-                  AND r.source = 'easyway'
-            """),
-            {"start_stop_id": start_stop_id, "end_stop_id": end_stop_id},
-        )
-        match = next(
-            (
-                row for row in result.mappings()
-                if _database_route_number(row["route_name"]) == route_number
-            ),
-            None,
-        )
-        if match is None:
-            return None
-        geometry = match["geojson"]
-        if isinstance(geometry, str):
-            geometry = json.loads(geometry)
-        if geometry.get("type") != "LineString":
-            return None
-        for coordinate in geometry.get("coordinates", []):
-            coord = [float(coordinate[0]), float(coordinate[1])]
-            if not coordinates or coordinates[-1] != coord:
-                coordinates.append(coord)
-
-    return coordinates if len(coordinates) >= 2 else None
+    ),
+    nearest AS MATERIALIZED (
+        SELECT coordinate.lon, coordinate.lat, stop.id AS stop_id
+        FROM (SELECT DISTINCT lon, lat FROM points) AS coordinate
+        CROSS JOIN LATERAL (
+            SELECT ST_SetSRID(ST_MakePoint(coordinate.lon, coordinate.lat), 4326)::geography AS geom
+        ) AS location
+        LEFT JOIN LATERAL (
+            SELECT id
+            FROM stops
+            WHERE source = 'easyway' AND ST_DWithin(geom, location.geom, 5)
+            ORDER BY ST_Distance(geom, location.geom), id
+            LIMIT 1
+        ) AS stop ON true
+    ),
+    legs AS MATERIALIZED (
+        SELECT p.feature_id, p.point_order, n.stop_id AS start_id,
+               lead(n.stop_id) OVER (PARTITION BY p.feature_id ORDER BY p.point_order) AS end_id
+        FROM points p
+        JOIN nearest n USING (lon, lat)
+    ),
+    segments AS MATERIALIZED (
+        SELECT g.start_stop_id, g.end_stop_id, g.id, r.name AS route_name,
+               ST_AsGeoJSON(g.geom::geometry) AS geojson
+        FROM (SELECT DISTINCT start_id, end_id FROM legs WHERE start_id <> end_id) AS pair
+        JOIN route_segment_geometries g ON g.start_stop_id = pair.start_id AND g.end_stop_id = pair.end_id
+        JOIN routes r ON r.id = g.route_id AND r.source = 'easyway'
+    )
+    SELECT l.feature_id, l.point_order, l.start_id IS NULL AS missing_stop, s.route_name, s.geojson
+    FROM legs l
+    LEFT JOIN segments s ON s.start_stop_id = l.start_id AND s.end_stop_id = l.end_id
+    WHERE l.start_id IS NULL OR l.start_id <> l.end_id
+    ORDER BY l.feature_id, l.point_order, s.id
+""")
 
 
-async def _use_route_specific_bus_geometry(
-    geojson: dict[str, Any], db: AsyncSession
+async def use_route_specific_bus_geometry(
+    collections: list[dict[str, Any]], db: AsyncSession,
 ) -> None:
-    valid_bus_numbers = LVIV_VALID_TRANSIT_ROUTE_NUMBERS["bus"]
-    for feature in geojson.get("features", []):
-        properties = feature.get("properties", {})
-        if (
-            properties.get("transport_mode") != "bus"
-            or str(properties.get("mode", "")).lower() not in {"bus", "minibus", "marshrutka"}
-        ):
+    features = []
+    points = []
+    for collection in collections:
+        for feature in collection.get("features", []):
+            props = feature.get("properties", {})
+            number = props.get("route_number")
+            if (
+                props.get("transport_mode") != "bus"
+                or str(props.get("mode", "")).lower() not in {"bus", "minibus", "marshrutka"}
+                or number not in LVIV_VALID_TRANSIT_ROUTE_NUMBERS["bus"]
+            ):
+                continue
+            geometry = feature.get("geometry", {})
+            coords = geometry.get("coordinates", [])
+            if len(coords) < 2:
+                continue
+            feature_id = len(features)
+            features.append((geometry, number))
+            points.extend(
+                {"feature_id": feature_id, "point_order": order, "lon": lon, "lat": lat}
+                for order, (lon, lat) in enumerate(coords)
+            )
+    if not points:
+        return
+
+    result = await db.execute(_BUS_GEOMETRY_SQL, {"points": json.dumps(points)})
+    legs = defaultdict(dict)
+    missing_stops = set()
+    for row in result.mappings():
+        feature_id = row["feature_id"]
+        if row["missing_stop"]:
+            missing_stops.add(feature_id)
             continue
-        route_number = properties.get("route_number")
-        if route_number not in valid_bus_numbers:
+        matches = legs[feature_id].setdefault(row["point_order"], {})
+        if row["route_name"]:
+            matches.setdefault(_database_route_number(row["route_name"]), row["geojson"])
+
+    for feature_id, (geometry, number) in enumerate(features):
+        if feature_id in missing_stops:
             continue
-        geometry = feature.get("geometry", {})
-        replacement = await _route_geometry_from_stops(
-            db, geometry.get("coordinates", []), route_number
-        )
-        if replacement:
-            geometry["coordinates"] = replacement
+        coordinates = []
+        for matches in legs[feature_id].values():
+            shape = matches.get(number)
+            if not shape:
+                break
+            if isinstance(shape, str):
+                shape = json.loads(shape)
+            if shape.get("type") != "LineString":
+                break
+            for lon, lat in shape["coordinates"]:
+                point = [float(lon), float(lat)]
+                if not coordinates or coordinates[-1] != point:
+                    coordinates.append(point)
+        else:
+            if len(coordinates) >= 2:
+                geometry["coordinates"] = coordinates
 
 
 def _route_departure_times() -> list[datetime]:
@@ -270,5 +275,5 @@ async def get_traveltime_routes(
     except (KeyError, TypeError, ValueError) as exc:
         raise TravelTimeRouteFormatError("TravelTime API returned invalid route geometry") from exc
     if db is not None:
-        await _use_route_specific_bus_geometry(geojson, db)
+        await use_route_specific_bus_geometry([geojson], db)
     return {"h3_id": h3_id, "routes": geojson}
