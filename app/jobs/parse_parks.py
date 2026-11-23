@@ -5,7 +5,7 @@ import h3, pandas as pd, requests
 import urllib3.util.connection
 from dotenv import load_dotenv
 from shapely.geometry import Polygon, shape
-from sqlalchemy import delete, func, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.database import async_session_maker
 from app.jobs.validation import require_point_types
@@ -266,7 +266,8 @@ def get_park_perimeter_points(osm_name: str, res: int = RES) -> list[tuple[float
             if pts:
                 print(f"   ✅ {osm_name} (OSM lookup {OSM_ID_OVERRIDES[osm_name]}) -> {len(pts)} H3-точок.")
                 osm_cache[osm_name] = pts
-                json.dump(osm_cache, open(OSM_CACHE_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+                with open(OSM_CACHE_FILE, "w", encoding="utf-8") as f:
+                    json.dump(osm_cache, f, ensure_ascii=False)
                 return pts
         except Exception as e:
             print(f"   Помилка Nominatim lookup для '{osm_name}': {e}")
@@ -320,7 +321,8 @@ def get_park_perimeter_points(osm_name: str, res: int = RES) -> list[tuple[float
                 if points:
                     print(f"   ✅ {osm_name} ({item.get('class')}={item.get('type')}) -> {len(points)} H3-точок.")
                     osm_cache[osm_name] = points
-                    json.dump(osm_cache, open(OSM_CACHE_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+                    with open(OSM_CACHE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(osm_cache, f, ensure_ascii=False)
                     return points
 
     print(f"   ⚠️ Полігон для '{osm_name}' не знайдено в Nominatim (піде у Fallback/Geoapify).")
@@ -396,7 +398,8 @@ def geocode_park(query_text: str, city: str):
 
     if result is not None or not had_api_error:
         cache[query_text] = result
-        json.dump(cache, open(CACHE_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
     return result
 
 
@@ -519,11 +522,11 @@ async def main(excel_path: str | None = None, dry_run: bool = False, force: bool
         print("🧪 dry-run: в БД нічого не записано. Перевір review_parks.csv")
         return
     if not points:
-        raise RuntimeError("⛔ Не згенеровано жодної точки парків — скасовую оновлення БД.")
+        raise RuntimeError("⛔ Не згенеровано жодної точки парків — запис скасовано.")
     if total_zones > 0 and (found_zones / total_zones) < 0.8 and not force:
         raise RuntimeError(
             f"⛔ Геокодер знайшов лише {found_zones} із {total_zones} зелених зон (<80%). "
-            "Оновлення БД скасовано; перевірте GEOAPIFY_API_KEY / мережу або використайте --force."
+            "Запис скасовано; перевірте GEOAPIFY_API_KEY / мережу або використайте --force."
         )
 
     async with async_session_maker() as session, session.begin():
@@ -532,30 +535,26 @@ async def main(excel_path: str | None = None, dry_run: bool = False, force: bool
         valid = [p for p in points if p["h3_id"] in grid]
         print(f"🎯 У сітці Львова: {len(valid)} точок (поза сіткою: {len(points) - len(valid)})")
         if not valid:
-            raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — скасовую оновлення БД.")
+            raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — запис скасовано.")
 
-        cond = (Point.source == SOURCE) & (Point.type == "park")
-        n_old = (await session.execute(select(func.count()).select_from(Point).where(cond))).scalar() or 0
-        if n_old > 0 and len(valid) < int(n_old * 0.7) and not force:
-            raise RuntimeError(
-                f"⛔ Знайдено лише {len(valid)} точок проти {n_old} у БД (<70%). "
-                "Запис скасовано; якщо зменшення очікуване, запустіть із --force."
-            )
-
-        if n_old:
-            print(f"🗑 Видаляю старі точки park ({n_old})...")
-            await session.execute(delete(Point).where(cond))
-        res = await session.execute(
-            pg_insert(Point).values(valid)
-            .on_conflict_do_nothing(constraint="uq_points_source_external_id")
+        stmt = pg_insert(Point).values(valid)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_points_source_external_id",
+            set_={
+                "name": stmt.excluded.name,
+                "type": stmt.excluded.type,
+                "h3_id": stmt.excluded.h3_id,
+                "geom": stmt.excluded.geom,
+            },
         )
-        print(f"✅ Додано в `points`: {res.rowcount}")
+        await session.execute(stmt)
+        print(f"✅ Додано/оновлено в `points`: {len(valid)}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Парсинг парків і скверів Львова")
     parser.add_argument("--excel-path", default=None, help="Шлях до Excel-файлу з парками")
     parser.add_argument("--dry-run", action="store_true", help="Лише згенерувати CSV без запису в БД")
-    parser.add_argument("--force", action="store_true", help="Ігнорувати поріг зменшення кількості точок і строгий збіг правил")
+    parser.add_argument("--force", action="store_true", help="Ігнорувати поріг повноти та строгий збіг правил")
     args = parser.parse_args()
     asyncio.run(main(excel_path=args.excel_path, dry_run=args.dry_run, force=args.force))

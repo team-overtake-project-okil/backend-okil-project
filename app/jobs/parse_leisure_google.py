@@ -2,7 +2,7 @@ import asyncio, json, os, sys
 from collections import Counter
 from math import hypot
 import h3, pandas as pd, requests
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.config import settings
 from app.database import async_session_maker
@@ -109,7 +109,8 @@ def km_from_center(lat, lon):
 
 
 def save_cache():
-    json.dump(cache, open(RAW_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    with open(RAW_FILE, "w", encoding="utf-8") as f:
+        json.dump(cache, f, ensure_ascii=False)
 
 
 def fetch_page(q, lat, lon, start, keys, idx, cache_only):
@@ -308,7 +309,7 @@ async def main(dry_run=False, cache_only=False, force=False):
         print("\n🧪 dry-run: в БД нічого не записано. Повний список у leisure_review.csv")
         return
     if not complete:
-        print("\n⛔ Збір/кеш неповний, у БД не пишу (щоб не замінити дані неповними).")
+        print("\n⛔ Збір/кеш неповний, у БД не пишу (щоб не записати часткові дані).")
         return
 
     async with async_session_maker() as session, session.begin():
@@ -317,36 +318,29 @@ async def main(dry_run=False, cache_only=False, force=False):
         valid = [p for p in points if p["h3_id"] in grid]
         print(f"\n🎯 У сітці: {len(valid)} (поза сіткою: {len(points) - len(valid)})")
         if not valid:
-            raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — скасовую оновлення БД.")
+            raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — запис скасовано.")
 
-        cond = (Point.source == SOURCE) & (Point.type.in_(TYPES))
-        old_types = (await session.execute(select(Point.type).where(cond))).scalars().all()
-        old_by_type = Counter(old_types)
         valid_by_type = Counter(p["type"] for p in valid)
-
         if not force:
             for tp in TYPES:
-                new_cnt = valid_by_type.get(tp, 0)
-                old_cnt = old_by_type.get(tp, 0)
-                if new_cnt == 0:
+                if valid_by_type.get(tp, 0) == 0:
                     raise RuntimeError(
-                        f"⛔ Для типу '{tp}' після H3-фільтрації залишилось 0 точок (у БД було {old_cnt}). "
-                        "Запис скасовано; якщо обнулення категорії очікуване, запустіть із --force."
-                    )
-                if old_cnt > 0 and new_cnt < int(old_cnt * 0.5):
-                    raise RuntimeError(
-                        f"⛔ Для типу '{tp}' знайдено лише {new_cnt} точок проти {old_cnt} у БД (<50%). "
-                        "Запис скасовано; якщо зменшення очікуване, запустіть із --force."
+                        f"⛔ Для типу '{tp}' після H3-фільтрації залишилось 0 точок. "
+                        "Запис скасовано; якщо порожня категорія очікувана, запустіть із --force."
                     )
 
-        n_old = sum(old_by_type.values())
-        print(f"🗑 Видаляю старі точки {TYPES} з джерела {SOURCE}: {n_old} ({dict(old_by_type)})")
-        await session.execute(delete(Point).where(cond))
-        await session.execute(
-            pg_insert(Point).values(valid)
-            .on_conflict_do_nothing(constraint="uq_points_source_external_id")
+        stmt = pg_insert(Point).values(valid)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_points_source_external_id",
+            set_={
+                "name": stmt.excluded.name,
+                "type": stmt.excluded.type,
+                "h3_id": stmt.excluded.h3_id,
+                "geom": stmt.excluded.geom,
+            },
         )
-        print(f"✅ Записано: {len(valid)} ({dict(valid_by_type)})")
+        await session.execute(stmt)
+        print(f"✅ Додано/оновлено в `points`: {len(valid)} ({dict(valid_by_type)})")
 
 
 if __name__ == "__main__":
