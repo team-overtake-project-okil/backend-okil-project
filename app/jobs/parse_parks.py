@@ -1,5 +1,6 @@
-import argparse, asyncio, json, os, re, time
+import argparse, asyncio, hashlib, json, os, re, time
 import socket
+from collections import Counter
 import h3, pandas as pd, requests
 import urllib3.util.connection
 from dotenv import load_dotenv
@@ -7,6 +8,7 @@ from shapely.geometry import Polygon, shape
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.database import async_session_maker
+from app.jobs.validation import require_point_types
 from app.models import HexTable, Point
 
 urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET
@@ -45,6 +47,7 @@ REJECT_OSM_TYPES = {
 load_dotenv()
 KEY = os.environ.get("GEOAPIFY_API_KEY", "")
 SOURCE, RES = "lviv_city_council_parks", 9
+REQUIRED_POINT_TYPES = {"park": "enjoyment"}
 DEFAULT_EXCEL_CANDIDATES = [
     os.environ.get("PARKS_EXCEL_PATH", ""),
     os.path.join("data", "7. Парки і сквери.xls"),
@@ -56,51 +59,80 @@ OSM_CACHE_FILE = "parks_osm_cache.json"
 
 FULL = {"вул.": "вулиця", "пл.": "площа", "просп.": "проспект", "пров.": "провулок", "бульв.": "бульвар"}
 
-# Свідомо пропускаємо заповідне болото "Торфовище Білогорща" (180)
-SKIP_PARK_IDS = {180}
 
-# 27 великих парків Львова -> точні полігони з OpenStreetMap
-LARGE_PARKS_OSM_NAMES = {
-    149: "Стрийський парк",
-    150: "Високий Замок",
-    151: "Парк імені Івана Франка",
-    152: "Знесіння",
-    153: "Левандівський парк",
-    154: "Парк імені Івана Виговського",
-    155: "Озеро Левандівське",
-    156: "Піскові озера",
-    159: "Лісопарк Зубра",
-    160: "Залізна Вода",
-    161: "Шевченківський гай",
-    162: "700-річчя Львова",
-    163: "Скнилівський парк",
-    164: "Личаківський парк",
-    165: "Парк На валах",
-    166: "Парк Студентів",
-    167: "Боднарівка",
-    168: "Горіховий Гай",
-    169: "Замарстинівський парк",
-    172: "Снопківський парк",
-    173: "Погулянка",
-    174: "Парк Архангела Михаїла",
-    175: "Парк культури та відпочинку імені Богдана Хмельницького",
-    176: "Майорівка",
-    177: "Кортумова гора",
-    178: "Білогорща",
-    181: "Кульпарків",
+def s(v):
+    return "" if pd.isna(v) else str(v).strip()
+
+
+def _norm(value) -> str:
+    text = s(value).lower()
+    text = (
+        text.replace("\xa0", " ")
+        .replace("’", "'")
+        .replace("`", "'")
+        .replace("ʼ", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("«", '"')
+        .replace("»", '"')
+        .replace("–", "-")
+        .replace("—", "-")
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _row_uid(raw_name: str, city: str, district: str, loc: str, area: str) -> str:
+    payload = "|".join((_norm(raw_name), _norm(city), _norm(district), _norm(loc), _norm(area)))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+# Свідомо пропускаємо заповідне болото "Торфовище Білогорща" (прив'язка за назвою, не за номером рядка)
+SKIP_PARK_NAMES = {
+    _norm('Парк, ландшафтний заказник місцевого значення "Торфовище Білогорща"'),
 }
 
-# Точні адреси для об'єктів, у яких в Excel вказано лише пам'ятник або перехрестя
+# 27 великих парків Львова -> точні полігони з OpenStreetMap (прив'язка за нормалізованою назвою з Excel)
+LARGE_PARKS_OSM_NAMES = {
+    _norm('Пам\'ятка садово-паркового мистецтва загальнодержавного значення "Стрийський парк"'): "Стрийський парк",
+    _norm('Пам’ятка садово-паркового мистецтва місцевого значення парк "Високий замок"'): "Високий Замок",
+    _norm("Пам’ятка садово-паркового мистецтва місцевого значення парк ім. Івана Франка"): "Парк імені Івана Франка",
+    _norm('Регіональний ландшафтний парк  "Знесіння" '): "Знесіння",
+    _norm('Парк "Левандівський"'): "Левандівський парк",
+    _norm("Парк імені І. Виговського"): "Парк імені Івана Виговського",
+    _norm('Парк "Озеро Левандівське"'): "Озеро Левандівське",
+    _norm('Парк "Піскові озера"'): "Піскові озера",
+    _norm('Парк Святого Івана Павла ІІ Папи Римського (лісопарк "Зубра")'): "Лісопарк Зубра",
+    _norm('Пам’ятка садово-паркового мистецтва місцевого значення парк "Залізна вода"'): "Залізна Вода",
+    _norm('Пам’ятка природи місцевого значення "Шевченківський гай"'): "Шевченківський гай",
+    _norm('Парк "700–річчя Львова"'): "700-річчя Львова",
+    _norm('Парк "Скнилівський"'): "Скнилівський парк",
+    _norm('Пам’ятка садово-паркового мистецтва місцевого значення "Личаківський парк"'): "Личаківський парк",
+    _norm('Парк "На валах"'): "Парк На валах",
+    _norm('Парк "Студентів"'): "Парк Студентів",
+    _norm('Парк "Боднарівка"'): "Боднарівка",
+    _norm('Парк "Горіховий гай"'): "Горіховий Гай",
+    _norm('Парк "Замарстинівський"'): "Замарстинівський парк",
+    _norm('Пам’ятка садово-паркового мистецтва місцевого значення парк "Снопківський"'): "Снопківський парк",
+    _norm('Парк, ботанічна пам’ятка природи місцевого значення "Лісопарк "Погулянка"'): "Погулянка",
+    _norm("Парк Архангела Михаїла"): "Парк Архангела Михаїла",
+    _norm("Пам’ятка садово-паркового мистецтва місцевого значення Львівський центральний парк культури і відпочинку ім. Б. Хмельницького"): "Парк культури та відпочинку імені Богдана Хмельницького",
+    _norm('Парк, зелена зона "Майорівка" (у тому числі геологічна пам’ятка природи місцевого значення "Медова Печера")'): "Майорівка",
+    _norm('Геологічна пам’ятка природи місцевого значення парк "Кортумова гора"'): "Кортумова гора",
+    _norm('Лісопарк "Білогорща"'): "Білогорща",
+    _norm('Об’єкт природно-заповідного фонду парк-пам’ятка садово-паркового мистецтва місцевого значення "Кульпарків"'): "Кульпарків",
+}
+
+# Точні адреси для об'єктів, у яких в Excel вказано лише пам'ятник або перехрестя (прив'язка за (name, location))
 QUERY_OVERRIDES = {
-    3: "вулиця Лисенка, 12, Львів",             # Сквер ім. Романа Іваничука (біля "Просвіти")
-    4: "вулиця Івана Франка, 108, Львів",       # Сквер біля пам'ятника І. Трушу
-    118: "вулиця Липинського, 28, Львів",       # Сквер на розі Липинського - Чорновола
-    183: "вулиця Авраама Лінкольна, 6а, Львів", # Парк вул. Липинського - Лінкольна
+    (_norm("Сквер ім. Романа Іваничука"), _norm('біля пам’ятника "Товариство "Просвіта"')): "вулиця Лисенка, 12, Львів",
+    (_norm("Сквер"), _norm("біля пам’ятника І. Трушу")): "вулиця Івана Франка, 108, Львів",
+    (_norm("Сквер"), _norm("на розі вул. Липинського В. - просп. Чорновола В.")): "вулиця Липинського, 28, Львів",
+    (_norm("Парк"), _norm("вул. Липинського В. - вул. Лінкольна А.")): "вулиця Авраама Лінкольна, 6а, Львів",
 }
 
 # Єдиний ручний fallback: зелена паркова зона Цитаделі (в OSM позначена лише будівля форту)
 FALLBACK_COORDS = {
-    147: [(49.83274, 24.02443)],
+    _norm('Паркова зона "Цитадель"'): [(49.83274, 24.02443)],
 }
 
 cache = json.load(open(CACHE_FILE, encoding="utf-8")) if os.path.exists(CACHE_FILE) else {}
@@ -135,10 +167,6 @@ def _normalize_street_case(text: str) -> str:
             w = re.sub(r"ій$", "а", w)
         fixed.append(w)
     return " ".join(fixed)
-
-
-def s(v):
-    return "" if pd.isna(v) else str(v).strip()
 
 
 def extract_search_query(name: str, loc: str, city: str) -> str:
@@ -372,41 +400,62 @@ def geocode_park(query_text: str, city: str):
     return result
 
 
-def parse(excel_path: str):
+def parse(excel_path: str, strict_mappings: bool = True):
     df = pd.read_excel(excel_path)
     print(f"📂 {os.path.basename(excel_path)}: {len(df)} рядків")
     points, review = [], []
     total_zones = 0
     found_zones = 0
+    uid_counts: Counter[str] = Counter()
+    skip_hits: Counter[str] = Counter()
+    large_hits: Counter[str] = Counter()
+    override_hits: Counter[tuple[str, str]] = Counter()
+    fallback_hits: Counter[str] = Counter()
 
-    for i, row in df.iterrows():
-        if i in SKIP_PARK_IDS:
+    for _, row in df.iterrows():
+        city = s(row["settlement"]) or "Львів"
+        raw_name = s(row["name"]) or "Сквер"
+        district = s(row.get("district"))
+        loc = s(row["location"])
+        area = s(row.get("area"))
+        norm_name = _norm(raw_name)
+        name_loc_key = (norm_name, _norm(loc))
+
+        if norm_name in SKIP_PARK_NAMES:
+            skip_hits[norm_name] += 1
             continue
 
         total_zones += 1
-        city = s(row["settlement"]) or "Львів"
-        raw_name = s(row["name"]) or "Сквер"
-        loc = s(row["location"])
+        base_uid = _row_uid(raw_name, city, district, loc, area)
+        uid_counts[base_uid] += 1
+        row_uid = base_uid if uid_counts[base_uid] == 1 else f"{base_uid}_{uid_counts[base_uid]}"
+
         display_name = raw_name if len(raw_name) > 8 else f"{raw_name} ({loc[:60]})".strip()
         coords_list = []
         status = "not_found"
 
         # 1. Точний полігон OSM для 27 великих парків
-        if i in LARGE_PARKS_OSM_NAMES:
-            osm_name = LARGE_PARKS_OSM_NAMES[i]
+        if norm_name in LARGE_PARKS_OSM_NAMES:
+            large_hits[norm_name] += 1
+            osm_name = LARGE_PARKS_OSM_NAMES[norm_name]
             coords_list = get_park_perimeter_points(osm_name)
             if coords_list:
                 status = f"ok (OSM polygon: {len(coords_list)} pts)"
                 display_name = osm_name
 
         # 2. Fallback (тільки Цитадель)
-        if not coords_list and i in FALLBACK_COORDS:
-            coords_list = FALLBACK_COORDS[i]
+        if not coords_list and norm_name in FALLBACK_COORDS:
+            fallback_hits[norm_name] += 1
+            coords_list = FALLBACK_COORDS[norm_name]
             status = f"ok (Fallback: {len(coords_list)} pts)"
 
         # 3. Геокодування для всіх інших парків і скверів
         if not coords_list:
-            query_text = QUERY_OVERRIDES.get(i) or extract_search_query(raw_name, loc, city)
+            if name_loc_key in QUERY_OVERRIDES:
+                override_hits[name_loc_key] += 1
+                query_text = QUERY_OVERRIDES[name_loc_key]
+            else:
+                query_text = extract_search_query(raw_name, loc, city)
             geo_coords = geocode_park(query_text, city)
             if geo_coords and (round(geo_coords[0], 5), round(geo_coords[1], 5)) not in BAD_LVIV_CENTROIDS:
                 coords_list = [geo_coords]
@@ -420,7 +469,7 @@ def parse(excel_path: str):
         for pt_idx, (lat, lon) in enumerate(coords_list):
             points.append({
                 "source": SOURCE,
-                "external_id": f"park_{i}_{pt_idx}",
+                "external_id": f"park_{row_uid}_{pt_idx}",
                 "name": display_name[:255],
                 "type": "park",
                 "h3_id": h3.latlng_to_cell(lat, lon, RES),
@@ -428,10 +477,30 @@ def parse(excel_path: str):
             })
 
         review.append({
-            "id": f"park_{i}", "name": display_name, "status": status,
+            "id": f"park_{row_uid}", "name": display_name, "status": status,
             "lat": coords_list[0][0] if coords_list else None,
             "lon": coords_list[0][1] if coords_list else None,
         })
+
+    if strict_mappings:
+        problems = []
+        for k in SKIP_PARK_NAMES:
+            if skip_hits[k] != 1:
+                problems.append(f"SKIP_PARK_NAMES[{k!r}] збігів={skip_hits[k]}")
+        for k, osm_name in LARGE_PARKS_OSM_NAMES.items():
+            if large_hits[k] != 1:
+                problems.append(f"LARGE_PARKS_OSM_NAMES[{osm_name!r}] збігів={large_hits[k]}")
+        for k in FALLBACK_COORDS:
+            if fallback_hits[k] != 1:
+                problems.append(f"FALLBACK_COORDS[{k!r}] збігів={fallback_hits[k]}")
+        for k in QUERY_OVERRIDES:
+            if override_hits[k] != 1:
+                problems.append(f"QUERY_OVERRIDES[{k!r}] збігів={override_hits[k]}")
+        if problems:
+            raise RuntimeError(
+                "⛔ Невідповідність прив'язок парків до Excel (можливо, змінилися назви або дублікати): "
+                + "; ".join(problems)
+            )
 
     out = pd.DataFrame(review)
     out.to_csv("review_parks.csv", index=False)
@@ -441,7 +510,11 @@ def parse(excel_path: str):
 
 async def main(excel_path: str | None = None, dry_run: bool = False, force: bool = False):
     src_path = resolve_excel_path(excel_path)
-    points, total_zones, found_zones = parse(src_path)
+    if not dry_run:
+        async with async_session_maker() as session:
+            await require_point_types(session, REQUIRED_POINT_TYPES)
+
+    points, total_zones, found_zones = parse(src_path, strict_mappings=not force)
     if dry_run:
         print("🧪 dry-run: в БД нічого не записано. Перевір review_parks.csv")
         return
@@ -454,6 +527,7 @@ async def main(excel_path: str | None = None, dry_run: bool = False, force: bool
         )
 
     async with async_session_maker() as session, session.begin():
+        await require_point_types(session, REQUIRED_POINT_TYPES)
         grid = set((await session.execute(select(HexTable.h3_id))).scalars())
         valid = [p for p in points if p["h3_id"] in grid]
         print(f"🎯 У сітці Львова: {len(valid)} точок (поза сіткою: {len(points) - len(valid)})")
@@ -482,6 +556,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Парсинг парків і скверів Львова")
     parser.add_argument("--excel-path", default=None, help="Шлях до Excel-файлу з парками")
     parser.add_argument("--dry-run", action="store_true", help="Лише згенерувати CSV без запису в БД")
-    parser.add_argument("--force", action="store_true", help="Ігнорувати поріг зменшення кількості точок")
+    parser.add_argument("--force", action="store_true", help="Ігнорувати поріг зменшення кількості точок і строгий збіг правил")
     args = parser.parse_args()
     asyncio.run(main(excel_path=args.excel_path, dry_run=args.dry_run, force=args.force))

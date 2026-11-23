@@ -2,11 +2,12 @@ import asyncio, json, os, sys
 from collections import Counter
 from math import hypot
 import h3, pandas as pd, requests
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.config import settings
 from app.database import async_session_maker
 from app.jobs.googlemaps import lviv_hex_centers
+from app.jobs.validation import require_point_types
 from app.models import HexTable, Point
 
 SOURCE, RES = "google_maps", 9
@@ -97,6 +98,7 @@ SPECS = [
      "reject_names": ENT_REJECT_NAMES},
 ]
 TYPES = list(dict.fromkeys(sp["type"] for sp in SPECS))
+REQUIRED_POINT_TYPES = {t: "enjoyment" for t in TYPES}
 BY_QUERY = {sp["query"]: (i, sp) for i, sp in enumerate(SPECS)}
 
 cache = json.load(open(RAW_FILE, encoding="utf-8")) if os.path.exists(RAW_FILE) else {}
@@ -111,7 +113,7 @@ def save_cache():
 
 
 def fetch_page(q, lat, lon, start, keys, idx, cache_only):
-    """(результати | None, індекс ключа). None = ключі вичерпано або сторінка відсутня в кеші при --cache-only."""
+    """(результати | None, індекс ключа). None = ключі вичерпано, збій API або пропуск у кеші при --cache-only."""
     ck = f"{q}|{lat:.5f}|{lon:.5f}|{start}"
     if ck in cache:
         return cache[ck], idx
@@ -121,24 +123,56 @@ def fetch_page(q, lat, lon, start, keys, idx, cache_only):
     global api_calls
     while idx < len(keys):
         api_calls += 1
-        r = requests.get("https://serpapi.com/search", params={
-            "engine": "google_maps", "q": q, "lat": str(lat), "lon": str(lon), "z": "16",
-            "hl": "uk", "gl": "ua", "start": start, "api_key": keys[idx],
-        }, timeout=60).json()
+        try:
+            resp = requests.get("https://serpapi.com/search", params={
+                "engine": "google_maps", "q": q, "lat": str(lat), "lon": str(lon), "z": "16",
+                "hl": "uk", "gl": "ua", "start": start, "api_key": keys[idx],
+            }, timeout=60)
+            resp.raise_for_status()
+            r = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            print(f"⚠️ Ключ №{idx + 1}: помилка запиту ({exc}). Перемикаюсь на наступний.")
+            idx += 1
+            continue
+
+        if not isinstance(r, dict):
+            print(f"⚠️ Ключ №{idx + 1}: неочікуваний формат відповіді SerpApi. Перемикаюсь на наступний.")
+            idx += 1
+            continue
+
         if "error" in r:
-            if "hasn't returned any results" in str(r["error"]):
+            if "hasn't returned any results" in str(r["error"]).lower():
                 cache[ck] = []
                 return [], idx
             print(f"⚠️ Ключ №{idx + 1}: {r['error']}. Перемикаюсь на наступний.")
             idx += 1
             continue
+
+        meta = r.get("search_metadata")
+        meta_status = meta.get("status") if isinstance(meta, dict) else None
+        if meta_status and meta_status != "Success":
+            print(f"⚠️ Ключ №{idx + 1}: статус SerpApi '{meta_status}'. Перемикаюсь на наступний.")
+            idx += 1
+            continue
+
+        local_results = r.get("local_results")
+        if not isinstance(local_results, list):
+            info = r.get("search_information")
+            state = str(info.get("local_results_state", "")).lower() if isinstance(info, dict) else ""
+            if meta_status == "Success" and "empty" in state:
+                cache[ck] = []
+                return [], idx
+            print(f"⚠️ Ключ №{idx + 1}: відповідь без local_results і без явного порожнього статусу. Не кешую, перемикаюсь на наступний.")
+            idx += 1
+            continue
+
         res = [{
             "place_id": p.get("place_id"), "title": p.get("title", ""), "gtype": p.get("type") or "",
             "address": (p.get("address") or "").replace("\n", " ").strip(),
             "reviews": p.get("reviews") or 0,
             "lat": (p.get("gps_coordinates") or {}).get("latitude"),
             "lon": (p.get("gps_coordinates") or {}).get("longitude"),
-        } for p in r.get("local_results", [])]
+        } for p in local_results]
         cache[ck] = res
         return res, idx
     return None, idx
@@ -161,7 +195,7 @@ def collect(cache_only=False):
                         print("❌ Кеш неповний: у режимі --cache-only запис у БД заблоковано.")
                     else:
                         save_cache()
-                        print("❌ Ключі вичерпано. Прогрес збережено, повторний запуск продовжить з цього місця.")
+                        print("❌ Ключі вичерпано або отримано некоректну відповідь API. Прогрес збережено.")
                     return False
                 if len(res) < 20:
                     break
@@ -255,6 +289,10 @@ def print_accepted(shown, review=None):
 
 
 async def main(dry_run=False, cache_only=False, force=False):
+    if not dry_run:
+        async with async_session_maker() as session:
+            await require_point_types(session, REQUIRED_POINT_TYPES)
+
     complete = collect(cache_only)
     points, review, shown = select_points()
     review.drop_duplicates(["place_id", "query"]).to_csv("leisure_review.csv", index=False)
@@ -274,6 +312,7 @@ async def main(dry_run=False, cache_only=False, force=False):
         return
 
     async with async_session_maker() as session, session.begin():
+        await require_point_types(session, REQUIRED_POINT_TYPES)
         grid = set((await session.execute(select(HexTable.h3_id))).scalars())
         valid = [p for p in points if p["h3_id"] in grid]
         print(f"\n🎯 У сітці: {len(valid)} (поза сіткою: {len(points) - len(valid)})")
@@ -281,20 +320,33 @@ async def main(dry_run=False, cache_only=False, force=False):
             raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — скасовую оновлення БД.")
 
         cond = (Point.source == SOURCE) & (Point.type.in_(TYPES))
-        n_old = (await session.execute(select(func.count()).select_from(Point).where(cond))).scalar() or 0
-        if n_old > 0 and len(valid) < int(n_old * 0.5) and not force:
-            raise RuntimeError(
-                f"⛔ Знайдено лише {len(valid)} точок проти {n_old} у БД (<50%). "
-                "Запис скасовано; якщо зменшення очікуване, запустіть із --force."
-            )
+        old_types = (await session.execute(select(Point.type).where(cond))).scalars().all()
+        old_by_type = Counter(old_types)
+        valid_by_type = Counter(p["type"] for p in valid)
 
-        print(f"🗑 Видаляю старі точки {TYPES} з джерела {SOURCE}: {n_old}")
+        if not force:
+            for tp in TYPES:
+                new_cnt = valid_by_type.get(tp, 0)
+                old_cnt = old_by_type.get(tp, 0)
+                if new_cnt == 0:
+                    raise RuntimeError(
+                        f"⛔ Для типу '{tp}' після H3-фільтрації залишилось 0 точок (у БД було {old_cnt}). "
+                        "Запис скасовано; якщо обнулення категорії очікуване, запустіть із --force."
+                    )
+                if old_cnt > 0 and new_cnt < int(old_cnt * 0.5):
+                    raise RuntimeError(
+                        f"⛔ Для типу '{tp}' знайдено лише {new_cnt} точок проти {old_cnt} у БД (<50%). "
+                        "Запис скасовано; якщо зменшення очікуване, запустіть із --force."
+                    )
+
+        n_old = sum(old_by_type.values())
+        print(f"🗑 Видаляю старі точки {TYPES} з джерела {SOURCE}: {n_old} ({dict(old_by_type)})")
         await session.execute(delete(Point).where(cond))
         await session.execute(
             pg_insert(Point).values(valid)
             .on_conflict_do_nothing(constraint="uq_points_source_external_id")
         )
-        print(f"✅ Записано: {len(valid)}")
+        print(f"✅ Записано: {len(valid)} ({dict(valid_by_type)})")
 
 
 if __name__ == "__main__":
