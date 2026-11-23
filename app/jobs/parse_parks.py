@@ -1,4 +1,4 @@
-import asyncio, json, os, re, sys, time
+import argparse, asyncio, json, os, re, time
 import socket
 import h3, pandas as pd, requests
 import urllib3.util.connection
@@ -45,7 +45,12 @@ REJECT_OSM_TYPES = {
 load_dotenv()
 KEY = os.environ.get("GEOAPIFY_API_KEY", "")
 SOURCE, RES = "lviv_city_council_parks", 9
-SRC = "/mnt/c/Users/Admin/Downloads/Telegram Desktop/Sources/Sources/7. Парки і сквери.xls"
+DEFAULT_EXCEL_CANDIDATES = [
+    os.environ.get("PARKS_EXCEL_PATH", ""),
+    os.path.join("data", "7. Парки і сквери.xls"),
+    os.path.join("Sources", "7. Парки і сквери.xls"),
+    "7. Парки і сквери.xls",
+]
 CACHE_FILE = "parks_geocache.json"
 OSM_CACHE_FILE = "parks_osm_cache.json"
 
@@ -107,6 +112,17 @@ BAD_LVIV_CENTROIDS = {
     (49.84310, 24.03054),
     (49.84212, 24.02917),
 }
+
+
+def resolve_excel_path(cli_path: str | None = None) -> str:
+    candidates = [cli_path] if cli_path else DEFAULT_EXCEL_CANDIDATES
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    raise FileNotFoundError(
+        "Не знайдено Excel-файл із парками. Передайте шлях через --excel-path <шлях> "
+        "або змінну середовища PARKS_EXCEL_PATH."
+    )
 
 
 def _normalize_street_case(text: str) -> str:
@@ -293,23 +309,34 @@ def geocode_park(query_text: str, city: str):
             return cached
 
     result = None
-    r = requests.get("https://api.geoapify.com/v1/geocode/search", params={
-        "text": query_text, "filter": "circle:24.031,49.842,18000",
-        "bias": "proximity:24.031,49.842", "lang": "uk", "limit": 5, "apiKey": KEY,
-    }, timeout=10)
-    time.sleep(0.2)
-    if r.ok:
-        for f in r.json().get("features") or []:
-            p = f["properties"]
-            if p.get("result_type") in BAD_GEOAPIFY_TYPES:
-                continue
-            if city == "Львів" and "Львівський район" in p.get("formatted", "") and "Львівська міська громада" not in p.get("formatted", ""):
-                continue
-            lat, lon = p["lat"], p["lon"]
-            if (round(lat, 5), round(lon, 5)) in BAD_LVIV_CENTROIDS:
-                continue
-            result = [lat, lon]
-            break
+    had_api_error = False
+
+    if KEY:
+        try:
+            r = requests.get("https://api.geoapify.com/v1/geocode/search", params={
+                "text": query_text, "filter": "circle:24.031,49.842,18000",
+                "bias": "proximity:24.031,49.842", "lang": "uk", "limit": 5, "apiKey": KEY,
+            }, timeout=10)
+            time.sleep(0.2)
+            if r.ok:
+                for f in r.json().get("features") or []:
+                    p = f["properties"]
+                    if p.get("result_type") in BAD_GEOAPIFY_TYPES:
+                        continue
+                    if city == "Львів" and "Львівський район" in p.get("formatted", "") and "Львівська міська громада" not in p.get("formatted", ""):
+                        continue
+                    lat, lon = p["lat"], p["lon"]
+                    if (round(lat, 5), round(lon, 5)) in BAD_LVIV_CENTROIDS:
+                        continue
+                    result = [lat, lon]
+                    break
+            else:
+                had_api_error = True
+        except Exception:
+            had_api_error = True
+            time.sleep(0.2)
+    else:
+        had_api_error = True
 
     if result is None:
         try:
@@ -326,6 +353,7 @@ def geocode_park(query_text: str, city: str):
                 headers={"User-Agent": "OKIL-Lviv-Parks/1.0 (student-project)"},
                 timeout=15,
             )
+            nr.raise_for_status()
             time.sleep(1.1)
             for item in nr.json():
                 if item.get("class") == "boundary" or item.get("type") in REJECT_OSM_TYPES:
@@ -335,22 +363,27 @@ def geocode_park(query_text: str, city: str):
                     result = [lat, lon]
                     break
         except Exception:
+            had_api_error = True
             time.sleep(1.1)
 
-    cache[query_text] = result
-    json.dump(cache, open(CACHE_FILE, "w", encoding="utf-8"), ensure_ascii=False)
+    if result is not None or not had_api_error:
+        cache[query_text] = result
+        json.dump(cache, open(CACHE_FILE, "w", encoding="utf-8"), ensure_ascii=False)
     return result
 
 
-def parse():
-    df = pd.read_excel(SRC)
-    print(f"📂 {os.path.basename(SRC)}: {len(df)} рядків")
+def parse(excel_path: str):
+    df = pd.read_excel(excel_path)
+    print(f"📂 {os.path.basename(excel_path)}: {len(df)} рядків")
     points, review = [], []
+    total_zones = 0
+    found_zones = 0
 
     for i, row in df.iterrows():
         if i in SKIP_PARK_IDS:
             continue
 
+        total_zones += 1
         city = s(row["settlement"]) or "Львів"
         raw_name = s(row["name"]) or "Сквер"
         loc = s(row["location"])
@@ -381,6 +414,9 @@ def parse():
             else:
                 status = "not_found (Geoapify failed)"
 
+        if coords_list:
+            found_zones += 1
+
         for pt_idx, (lat, lon) in enumerate(coords_list):
             points.append({
                 "source": SOURCE,
@@ -399,33 +435,53 @@ def parse():
 
     out = pd.DataFrame(review)
     out.to_csv("review_parks.csv", index=False)
-    print(f"\n✅ Згенеровано точок: {len(points)} із {len(out)} зелених зон")
-    return points
+    print(f"\n✅ Згенеровано точок: {len(points)} із {found_zones}/{total_zones} зелених зон")
+    return points, total_zones, found_zones
 
 
-async def main(dry_run=False):
-    points = parse()
-    if not points:
+async def main(excel_path: str | None = None, dry_run: bool = False, force: bool = False):
+    src_path = resolve_excel_path(excel_path)
+    points, total_zones, found_zones = parse(src_path)
+    if dry_run:
+        print("🧪 dry-run: в БД нічого не записано. Перевір review_parks.csv")
         return
+    if not points:
+        raise RuntimeError("⛔ Не згенеровано жодної точки парків — скасовую оновлення БД.")
+    if total_zones > 0 and (found_zones / total_zones) < 0.8 and not force:
+        raise RuntimeError(
+            f"⛔ Геокодер знайшов лише {found_zones} із {total_zones} зелених зон (<80%). "
+            "Оновлення БД скасовано; перевірте GEOAPIFY_API_KEY / мережу або використайте --force."
+        )
+
     async with async_session_maker() as session, session.begin():
         grid = set((await session.execute(select(HexTable.h3_id))).scalars())
         valid = [p for p in points if p["h3_id"] in grid]
         print(f"🎯 У сітці Львова: {len(valid)} точок (поза сіткою: {len(points) - len(valid)})")
-        if dry_run:
-            print("🧪 dry-run: в БД нічого не записано. Перевір review_parks.csv")
-            return
+        if not valid:
+            raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — скасовую оновлення БД.")
+
         cond = (Point.source == SOURCE) & (Point.type == "park")
-        n_old = (await session.execute(select(func.count()).select_from(Point).where(cond))).scalar()
+        n_old = (await session.execute(select(func.count()).select_from(Point).where(cond))).scalar() or 0
+        if n_old > 0 and len(valid) < int(n_old * 0.7) and not force:
+            raise RuntimeError(
+                f"⛔ Знайдено лише {len(valid)} точок проти {n_old} у БД (<70%). "
+                "Запис скасовано; якщо зменшення очікуване, запустіть із --force."
+            )
+
         if n_old:
             print(f"🗑 Видаляю старі точки park ({n_old})...")
             await session.execute(delete(Point).where(cond))
-        if valid:
-            res = await session.execute(
-                pg_insert(Point).values(valid)
-                .on_conflict_do_nothing(constraint="uq_points_source_external_id")
-            )
-            print(f"✅ Додано в `points`: {res.rowcount}")
+        res = await session.execute(
+            pg_insert(Point).values(valid)
+            .on_conflict_do_nothing(constraint="uq_points_source_external_id")
+        )
+        print(f"✅ Додано в `points`: {res.rowcount}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main("--dry-run" in sys.argv))
+    parser = argparse.ArgumentParser(description="Парсинг парків і скверів Львова")
+    parser.add_argument("--excel-path", default=None, help="Шлях до Excel-файлу з парками")
+    parser.add_argument("--dry-run", action="store_true", help="Лише згенерувати CSV без запису в БД")
+    parser.add_argument("--force", action="store_true", help="Ігнорувати поріг зменшення кількості точок")
+    args = parser.parse_args()
+    asyncio.run(main(excel_path=args.excel_path, dry_run=args.dry_run, force=args.force))

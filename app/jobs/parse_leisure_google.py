@@ -111,12 +111,13 @@ def save_cache():
 
 
 def fetch_page(q, lat, lon, start, keys, idx, cache_only):
-    """(результати | None, індекс ключа). None = усі ключі вичерпано. Успішні відповіді кешуються."""
+    """(результати | None, індекс ключа). None = ключі вичерпано або сторінка відсутня в кеші при --cache-only."""
     ck = f"{q}|{lat:.5f}|{lon:.5f}|{start}"
     if ck in cache:
         return cache[ck], idx
     if cache_only:
-        return [], idx
+        print(f"⚠️ Пропущено в кеші (--cache-only): {ck}")
+        return None, idx
     global api_calls
     while idx < len(keys):
         api_calls += 1
@@ -144,7 +145,7 @@ def fetch_page(q, lat, lon, start, keys, idx, cache_only):
 
 
 def collect(cache_only=False):
-    """Збирає сирі відповіді в кеш. False, якщо ключі вичерпались раніше, ніж збір завершився."""
+    """Збирає сирі відповіді в кеш. False, якщо ключі вичерпались або кеш неповний при --cache-only."""
     keys = [k.strip() for k in settings.SERPAPI_KEYS.split(",") if k.strip()]
     if not keys and not cache_only:
         raise ValueError("Не знайдено жодного ключа в SERPAPI_KEYS!")
@@ -156,12 +157,16 @@ def collect(cache_only=False):
             for start in (0, 20, 40):
                 res, idx = fetch_page(sp["query"], lat, lon, start, keys, idx, cache_only)
                 if res is None:
-                    save_cache()
-                    print("❌ Ключі вичерпано. Прогрес збережено, повторний запуск продовжить з цього місця.")
+                    if cache_only:
+                        print("❌ Кеш неповний: у режимі --cache-only запис у БД заблоковано.")
+                    else:
+                        save_cache()
+                        print("❌ Ключі вичерпано. Прогрес збережено, повторний запуск продовжить з цього місця.")
                     return False
                 if len(res) < 20:
                     break
-            save_cache()
+            if not cache_only:
+                save_cache()
     print(f"Запитів до SerpApi у цьому запуску: {api_calls}")
     return True
 
@@ -217,7 +222,6 @@ def select_points():
                               "gtype": p["gtype"], "km": km, "address": p["address"]},
                 }
 
-
     points = [{k: v for k, v in pt.items() if k not in ("order", "_show", "_lat", "_lon")} for pt in accepted.values()]
     shown = pd.DataFrame([pt["_show"] for pt in accepted.values()])
     return points, pd.DataFrame(rows), shown
@@ -250,7 +254,7 @@ def print_accepted(shown, review=None):
         print(f"   {r.type:7} | {r.name[:42]:42} | {r.reviews:>5} | {r.gtype[:20]:20} | {r.km:4.1f} км | {r.address[:45]}")
 
 
-async def main(dry_run=False, cache_only=False):
+async def main(dry_run=False, cache_only=False, force=False):
     complete = collect(cache_only)
     points, review, shown = select_points()
     review.drop_duplicates(["place_id", "query"]).to_csv("leisure_review.csv", index=False)
@@ -266,24 +270,32 @@ async def main(dry_run=False, cache_only=False):
         print("\n🧪 dry-run: в БД нічого не записано. Повний список у leisure_review.csv")
         return
     if not complete:
-        print("\n⛔ Збір неповний, у БД не пишу (щоб не замінити дані неповними).")
+        print("\n⛔ Збір/кеш неповний, у БД не пишу (щоб не замінити дані неповними).")
         return
 
     async with async_session_maker() as session, session.begin():
         grid = set((await session.execute(select(HexTable.h3_id))).scalars())
         valid = [p for p in points if p["h3_id"] in grid]
         print(f"\n🎯 У сітці: {len(valid)} (поза сіткою: {len(points) - len(valid)})")
-        cond = (Point.source == SOURCE) & (Point.type != "mall")
-        n_old = (await session.execute(select(func.count()).select_from(Point).where(cond))).scalar()
+        if not valid:
+            raise RuntimeError("⛔ Після фільтрації за H3-сіткою залишилось 0 точок — скасовую оновлення БД.")
+
+        cond = (Point.source == SOURCE) & (Point.type.in_(TYPES))
+        n_old = (await session.execute(select(func.count()).select_from(Point).where(cond))).scalar() or 0
+        if n_old > 0 and len(valid) < int(n_old * 0.5) and not force:
+            raise RuntimeError(
+                f"⛔ Знайдено лише {len(valid)} точок проти {n_old} у БД (<50%). "
+                "Запис скасовано; якщо зменшення очікуване, запустіть із --force."
+            )
+
         print(f"🗑 Видаляю старі точки {TYPES} з джерела {SOURCE}: {n_old}")
         await session.execute(delete(Point).where(cond))
-        if valid:
-            await session.execute(
-                pg_insert(Point).values(valid)
-                .on_conflict_do_nothing(constraint="uq_points_source_external_id")
-            )
+        await session.execute(
+            pg_insert(Point).values(valid)
+            .on_conflict_do_nothing(constraint="uq_points_source_external_id")
+        )
         print(f"✅ Записано: {len(valid)}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main("--dry-run" in sys.argv, "--cache-only" in sys.argv))
+    asyncio.run(main("--dry-run" in sys.argv, "--cache-only" in sys.argv, "--force" in sys.argv))
