@@ -1,11 +1,14 @@
+import asyncio
 import json
+import logging
 import re
 from heapq import nlargest
-from collections.abc import Mapping, Sequence
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Any, Protocol, TypeVar
 
 import httpx
 from sqlalchemy import String, bindparam, cast, select, union
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.category_narratives.config import CATEGORY_NAMES
@@ -13,7 +16,7 @@ from app.category_narratives.config import TYPE_NAMES
 from app.category_narratives.service import fetch_hexagon_explanations
 from app.config import settings
 from app.hexagon_repository import fetch_hexagon, fetch_hexagons
-from app.embedding_api import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, create_embedder
+from app.embedding_api import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, EmbeddingAPIError, create_embedder
 from app.models import AIKnowledge, HexTable, Point, PointType, Route, Stop, StopRouteConnectable
 from app.schemas import HexagonWeights
 from app.scoring import calculate_category_ratings, calculate_overall_rating
@@ -68,9 +71,13 @@ SYSTEM_PROMPT = (
 POI_LIMIT = 100
 PROJECT_KNOWLEDGE_LIMIT = 3
 PROJECT_KNOWLEDGE_MIN_SIMILARITY = 0.52
+OPTIONAL_KNOWLEDGE_TIMEOUT_SECONDS = 2.0
+logger = logging.getLogger(__name__)
 PROJECT_KNOWLEDGE_MISSING = (
     "У базі знань Околу бракує інформації для відповіді на це запитання."
 )
+PROJECT_KNOWLEDGE_UNAVAILABLE = "База знань Околу тимчасово недоступна. Спробуйте ще раз пізніше."
+KnowledgeResult = TypeVar("KnowledgeResult")
 MAX_COMPLETION_TOKENS = 10000
 NEXT_PROMPT_MAX_TOKENS = 1024
 NEXT_PROMPT_SYSTEM_PROMPT = (
@@ -382,6 +389,26 @@ async def get_project_information(
         "knowledge_fragments": fragments,
     }
 
+
+async def _retrieve_chat_knowledge(
+    db: AsyncSession,
+    question: str,
+    query_embedding: Sequence[float] | None,
+    read: Callable[[AsyncSession, Sequence[float]], Awaitable[KnowledgeResult]],
+    *,
+    timeout: float,
+) -> KnowledgeResult | None:
+    """Keep lookup failures out of the main chat transaction."""
+    try:
+        async with asyncio.timeout(timeout):
+            if query_embedding is None:
+                query_embedding = await create_embedder()(question)
+            async with AsyncSession(bind=db.bind) as lookup:
+                return await read(lookup, query_embedding)
+    except (EmbeddingAPIError, SQLAlchemyError, TimeoutError, ValueError) as exc:
+        logger.info("Chat knowledge lookup skipped (%s)", type(exc).__name__)
+        return None
+
 async def get_hex_overview_information(
     db: AsyncSession,
     h3_id: str,
@@ -658,9 +685,12 @@ async def answer_intent(
     elif intent == Intent.PROJECT_INFO or intent == "project_info":
         if PROJECT_DEFINITION_QUESTION.fullmatch(question.strip()):
             return PROJECT_OVERVIEW
-        if query_embedding is None:
-            query_embedding = await create_embedder()(question)
-        context = await get_project_information(db, query_embedding)
+        context = await _retrieve_chat_knowledge(
+            db, question, query_embedding, get_project_information,
+            timeout=settings.EMBEDDING_API_TIMEOUT_SECONDS,
+        )
+        if context is None:
+            return PROJECT_KNOWLEDGE_UNAVAILABLE
         if not context["knowledge_fragments"]:
             return PROJECT_KNOWLEDGE_MISSING
     elif intent == Intent.TRANSIT_LINES or intent == "transit_lines":
@@ -684,8 +714,10 @@ async def answer_intent(
     # Keep it separate from live/spatial facts so retrieved city-wide records
     # cannot be mistaken for objects inside the requested H3 cell.
     if intent != Intent.PROJECT_INFO and intent != "project_info":
-        if query_embedding is None:
-            query_embedding = await create_embedder()(question)
-        context["knowledge_fragments"] = await get_knowledge_fragments(db, query_embedding)
+        fragments = await _retrieve_chat_knowledge(
+            db, question, query_embedding, get_knowledge_fragments,
+            timeout=OPTIONAL_KNOWLEDGE_TIMEOUT_SECONDS,
+        )
+        context = {**context, "knowledge_fragments": fragments or []}
 
     return await groq.answer(question, intent, context)

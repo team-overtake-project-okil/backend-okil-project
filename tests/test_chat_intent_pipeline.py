@@ -6,7 +6,7 @@ so these tests check routing and payloads, not language-model quality.
 """
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from unittest.mock import AsyncMock, Mock
 
 import h3
@@ -60,7 +60,9 @@ CONTEXTS.update({intent: {"knowledge_fragments": []} for intent in Intent if int
 
 class Pipeline:
     def __init__(self, monkeypatch):
-        self.db = Mock(execute=AsyncMock())
+        self.db = Mock(execute=AsyncMock(), bind=None)
+        self.knowledge_db = Mock()
+        monkeypatch.setattr(ai_assistant, "AsyncSession", lambda *, bind: nullcontext(self.knowledge_db))
         self.session_opened = False
         self.groq = Mock(answer=AsyncMock(side_effect=lambda q, intent, ctx: f"AI:{intent.value}"))
         self.services = {
@@ -158,7 +160,7 @@ def test_h3_scoped_services_receive_the_database_session_and_cell(pipeline):
 def test_project_question_needs_no_h3_context(pipeline):
     assert pipeline.reply("Розкажи про проєкт") == "AI:project_info"
     pipeline.services[Intent.PROJECT_INFO].assert_awaited_once_with(
-        pipeline.db, tuple(one_hot(INTENT_AXIS[Intent.PROJECT_INFO])),
+        pipeline.knowledge_db, tuple(one_hot(INTENT_AXIS[Intent.PROJECT_INFO])),
     )
 
 
@@ -176,6 +178,27 @@ def test_combined_question_returns_one_answer_per_part_in_order(pipeline):
 
     assert answer == "AI:hex_score\n\nAI:poi"
     assert [intent for intent, _ in pipeline.groq_calls()] == [Intent.HEX_SCORE, Intent.POI]
+
+
+def test_embedding_failure_for_merged_questions_keeps_both_answers(pipeline, monkeypatch):
+    embed = AsyncMock(side_effect=ai_assistant.EmbeddingAPIError("offline"))
+    monkeypatch.setattr(ai_assistant, "create_embedder", lambda: embed)
+
+    answer = pipeline.reply(f"Поясни оцінку {CELL}. Яка оцінка? Які місця поруч?")
+
+    assert answer == "AI:hex_score\n\nAI:poi"
+    embed.assert_awaited_once()
+    pipeline.services["knowledge"].assert_awaited_once()
+
+
+def test_project_knowledge_failure_keeps_other_answer(pipeline):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    pipeline.services[Intent.PROJECT_INFO].side_effect = SQLAlchemyError("knowledge unavailable")
+
+    answer = pipeline.reply(f"Поясни оцінку {CELL}. Розкажи про проєкт.")
+
+    assert answer == f"AI:hex_score\n\n{ai_assistant.PROJECT_KNOWLEDGE_UNAVAILABLE}"
 
 
 def test_unrelated_part_of_a_combined_question_is_ignored(pipeline):

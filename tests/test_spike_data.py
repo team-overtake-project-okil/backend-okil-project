@@ -1,9 +1,12 @@
 import asyncio
 from collections import Counter
+from contextlib import contextmanager
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import httpx
+import pytest
 
 from app import import_spike_data
 from app.spike_data import (
@@ -335,3 +338,74 @@ def test_write_spike_records_groups_by_document_and_counts(monkeypatch):
 
     assert calls == [("a", 2), ("b", 1)]
     assert result == {"inserted": 3, "updated": 0, "unchanged": 0}
+
+
+def test_replace_spike_records_removes_stale_rows_in_same_transaction(monkeypatch):
+    source = SOURCE_DEFINITIONS["health_facilities"]
+    records, _ = parse_source_rows(source, [healthcare_row()], provenance(source))
+    meta = records[0]["metadata"]
+    events = []
+
+    @contextmanager
+    def transaction():
+        events.append("begin")
+        yield
+        events.append("commit")
+
+    @contextmanager
+    def cursor():
+        def execute(sql, params):
+            assert sql.startswith("DELETE FROM public.ai_knowledge ")
+            assert "metadata->>'document_id' = %s" in sql
+            assert "metadata->>'source_dataset_id' = %s" in sql
+            assert "metadata->>'source_kind' = 'city_open_data'" in sql
+            assert "<> ALL(%s)" in sql
+            assert params == (meta["document_id"], source.dataset_id, [meta["chunk_id"]])
+            events.append("delete")
+
+        yield Mock(execute=execute, rowcount=1)
+
+    connection = Mock(transaction=transaction, cursor=cursor)
+
+    def update(db, rows):
+        assert db is connection
+        assert rows == records
+        events.append("upsert")
+        return {"inserted": 0, "updated": 1, "unchanged": 0}
+
+    monkeypatch.setattr(import_spike_data, "write_records", update)
+
+    counts = import_spike_data.write_spike_records(connection, records, replace_sources=True)
+
+    assert counts == {"inserted": 0, "updated": 1, "unchanged": 0, "deleted": 1}
+    assert events == ["begin", "upsert", "delete", "commit"]
+
+
+def test_replace_spike_records_rejects_other_documents_before_writing():
+    connection = Mock()
+    with pytest.raises(ValueError, match="unrecognized spike source"):
+        import_spike_data.write_spike_records(
+            connection, [{"metadata": {"document_id": "okil-mechanics"}}], replace_sources=True,
+        )
+    assert not connection.mock_calls
+
+
+def test_replace_spike_records_rejects_invalid_snapshot_before_import(monkeypatch, tmp_path):
+    source = SOURCE_DEFINITIONS["health_facilities"]
+    records, _ = parse_source_rows(source, [healthcare_row()], provenance(source))
+    snapshot = tmp_path / "snapshot.jsonl"
+    snapshot.write_text(json.dumps(records[0]) + "\n{malformed\n", encoding="utf-8")
+    report = tmp_path / "report.json"
+    apply = AsyncMock()
+    monkeypatch.setattr(import_spike_data, "import_snapshot", apply)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["import_spike_data", "--input", str(snapshot), "--report", str(report), "--apply", "--replace-sources"],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        import_spike_data.main()
+
+    assert exc.value.code == 1
+    assert json.loads(report.read_text(encoding="utf-8"))["rejected_records"] == 1
+    apply.assert_not_awaited()
