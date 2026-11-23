@@ -39,9 +39,16 @@ SYSTEM_PROMPT = (
     "Окіл (OKIL) — назва проєкту. Технічні радіуси впливу пояснюй лише, "
     "коли користувач запитує про методику оцінювання або радіуси. "
     "Уникай внутрішніх імен полів у відповіді. "
-    "Для питань про проєкт використовуй лише ті фрагменти бази знань, "
-    "які прямо стосуються запитання. Умовні приклади позначай як умовні. "
-    "Якщо фрагменти не підтверджують відповідь, скажи, що інформації бракує. "
+    "Використовуй лише ті фрагменти бази знань, які прямо стосуються запитання. "
+    "Умовні приклади позначай як умовні. "
+    "Якщо контекст містить knowledge_fragments, це додаткові текстові довідки, "
+    "відібрані за змістом запитання. Вони не доводять, що місце розташоване "
+    "в конкретному гексі, не замінюють структуровані дані та не є повним "
+    "переліком. Для фактів про конкретний гекс, оцінки, POI й маршрути "
+    "пріоритет мають відповідні структуровані поля контексту. "
+    "Для запитань про проєкт, якщо фрагменти не підтверджують відповідь, "
+    "скажи, що інформації бракує; для інших запитань використовуй "
+    "структурований контекст відповідного інтенту. "
     "НІКОЛИ не створюй великі таблиці з багатьма колонками для списків гексів чи об'єктів. "
     "Замість таблиць використовуй зручні марковані списки (bullet points), де коротко вказуй ID ділянки, "
     "загальний бал та ключові переваги, оскільки вікно чату вузьке. "
@@ -345,9 +352,9 @@ def format_poi_answer(poi_information: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-async def get_project_information(
+async def get_knowledge_fragments(
     db: AsyncSession, query_embedding: Sequence[float],
-) -> dict[str, Any]:
+) -> list[str]:
     query_vector = bindparam(
         "knowledge_query", list(query_embedding), type_=AIKnowledge.embedding.type,
     )
@@ -363,9 +370,16 @@ async def get_project_information(
         .order_by(distance)
         .limit(PROJECT_KNOWLEDGE_LIMIT)
     )
+    return [row["text"] for row in result.mappings().all()]
+
+
+async def get_project_information(
+    db: AsyncSession, query_embedding: Sequence[float],
+) -> dict[str, Any]:
+    fragments = await get_knowledge_fragments(db, query_embedding)
     return {
         "project": PROJECT_OVERVIEW,
-        "knowledge_fragments": [row["text"] for row in result.mappings().all()],
+        "knowledge_fragments": fragments,
     }
 
 async def get_hex_overview_information(
@@ -665,5 +679,13 @@ async def answer_intent(
             return f"Гекс {h3_id} не знайдено в базі даних."
     else:
         raise ValueError(f"Unsupported intent: {intent}")
+
+    # Every supported intent may benefit from relevant explanatory knowledge.
+    # Keep it separate from live/spatial facts so retrieved city-wide records
+    # cannot be mistaken for objects inside the requested H3 cell.
+    if intent != Intent.PROJECT_INFO and intent != "project_info":
+        if query_embedding is None:
+            query_embedding = await create_embedder()(question)
+        context["knowledge_fragments"] = await get_knowledge_fragments(db, query_embedding)
 
     return await groq.answer(question, intent, context)

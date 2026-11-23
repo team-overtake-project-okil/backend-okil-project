@@ -25,8 +25,8 @@ from app.intent_classifier import (
 CELL = h3.latlng_to_cell(49.84, 24.03, 9)
 
 # One-hot centroid per intent; queries are embedded by simple keyword rules.
-INTENT_AXIS = {Intent.POI: 0, Intent.HEX_SCORE: 1, Intent.PROJECT_INFO: 2}
-UNRELATED_AXIS = 3
+INTENT_AXIS = {intent: index for index, intent in enumerate(Intent)}
+UNRELATED_AXIS = len(INTENT_AXIS)
 KEYWORDS = (("оцінк", Intent.HEX_SCORE), ("проєкт", Intent.PROJECT_INFO), ("місц", Intent.POI))
 
 
@@ -50,10 +50,12 @@ def make_classifier():
 
 
 CONTEXTS = {
-    Intent.POI: {"h3_id": CELL, "objects": [{"name": "Аптека", "type": "pharmacy"}], "total_returned": 1},
-    Intent.HEX_SCORE: {"h3_id": CELL, "overall_rating": 72, "categories": []},
+    Intent.POI: {"h3_id": CELL, "objects": [{"name": "Аптека", "type": "pharmacy"}], "total_returned": 1,
+                  "knowledge_fragments": []},
+    Intent.HEX_SCORE: {"h3_id": CELL, "overall_rating": 72, "categories": [], "knowledge_fragments": []},
     Intent.PROJECT_INFO: {"project": "OKIL", "knowledge_fragments": ["Довідка про Окіл."]},
 }
+CONTEXTS.update({intent: {"knowledge_fragments": []} for intent in Intent if intent not in CONTEXTS})
 
 
 class Pipeline:
@@ -62,13 +64,14 @@ class Pipeline:
         self.session_opened = False
         self.groq = Mock(answer=AsyncMock(side_effect=lambda q, intent, ctx: f"AI:{intent.value}"))
         self.services = {
-            Intent.POI: AsyncMock(return_value=CONTEXTS[Intent.POI]),
-            Intent.HEX_SCORE: AsyncMock(return_value=CONTEXTS[Intent.HEX_SCORE]),
-            Intent.PROJECT_INFO: AsyncMock(return_value=CONTEXTS[Intent.PROJECT_INFO]),
+            intent: AsyncMock(return_value=CONTEXTS[intent])
+            for intent in Intent
         }
+        self.services["knowledge"] = AsyncMock(return_value=[])
         monkeypatch.setattr(ai_assistant, "get_poi_information", self.services[Intent.POI])
         monkeypatch.setattr(ai_assistant, "get_hex_information", self.services[Intent.HEX_SCORE])
         monkeypatch.setattr(ai_assistant, "get_project_information", self.services[Intent.PROJECT_INFO])
+        monkeypatch.setattr(ai_assistant, "get_knowledge_fragments", self.services["knowledge"])
 
         @asynccontextmanager
         async def session():
@@ -95,7 +98,11 @@ def pipeline(monkeypatch):
 
 
 def test_supported_intent_values_are_unchanged():
-    assert {intent.value for intent in Intent} == {"poi", "hex_score", "project_info"}
+    assert {intent.value for intent in Intent} == {
+        "poi", "hex_score", "project_info", "hex_overview", "mobility_routes",
+        "top_hexagons", "weights_simulation", "transit_lines",
+        "neighborhood_context", "infrastructure_gaps",
+    }
 
 
 def test_every_intent_has_a_description_and_a_routing_case():
@@ -132,6 +139,9 @@ def test_question_is_routed_to_the_matching_service_and_model_context(pipeline, 
 
     assert answer == f"AI:{expected.value}"
     for intent, service in pipeline.services.items():
+        if intent == "knowledge":
+            assert service.await_count == (0 if expected is Intent.PROJECT_INFO else 1)
+            continue
         assert service.await_count == (1 if intent is expected else 0), intent
     # The model gets the facts from that service, never anything the user typed.
     assert pipeline.groq_calls() == [(expected, CONTEXTS[expected])]
@@ -142,6 +152,7 @@ def test_h3_scoped_services_receive_the_database_session_and_cell(pipeline):
     pipeline.reply(f"Поясни оцінку {CELL}")
     pipeline.services[Intent.POI].assert_awaited_once_with(pipeline.db, CELL)
     pipeline.services[Intent.HEX_SCORE].assert_awaited_once_with(pipeline.db, CELL)
+    assert pipeline.services["knowledge"].await_count == 2
 
 
 def test_project_question_needs_no_h3_context(pipeline):

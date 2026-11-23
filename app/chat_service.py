@@ -176,11 +176,7 @@ class ChatAIService:
         async with _connected_session(self.session_factory) as db:
             for part_text, intent in parts:
                 query_embedding = query_embeddings.get(part_text)
-                kwargs = (
-                    {"query_embedding": query_embedding}
-                    if intent.value == "project_info" and query_embedding is not None
-                    else {}
-                )
+                kwargs = {"query_embedding": query_embedding} if query_embedding is not None else {}
                 answer = await self.answer_intent(
                     db, self.client, part_text, intent, cell, **kwargs
                 )

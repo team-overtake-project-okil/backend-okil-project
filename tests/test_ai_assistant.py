@@ -204,6 +204,39 @@ def test_project_methodology_question_passes_retrieved_text_to_groq():
     assert result == "Пояснення радіусів"
 
 
+def test_hex_score_also_receives_relevant_vector_knowledge(monkeypatch):
+    expected_vector = [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
+    score_context = {"h3_id": "8928308280bffff", "overall_rating": 72, "categories": []}
+
+    async def get_hex_information(db, h3_id):
+        assert h3_id == score_context["h3_id"]
+        return dict(score_context)
+
+    async def get_knowledge_fragments(db, vector):
+        assert vector == expected_vector
+        return ["Нульовий бал активної категорії може знизити загальну оцінку."]
+
+    class Client:
+        async def answer(self, question, intent, context):
+            assert intent is Intent.HEX_SCORE
+            assert context["overall_rating"] == 72
+            assert context["knowledge_fragments"] == [
+                "Нульовий бал активної категорії може знизити загальну оцінку."
+            ]
+            return "Оцінка з поясненням"
+
+    monkeypatch.setattr(ai_assistant, "get_hex_information", get_hex_information)
+    monkeypatch.setattr(ai_assistant, "get_knowledge_fragments", get_knowledge_fragments)
+    result = asyncio.run(
+        answer_intent(
+            object(), Client(), "Чому така оцінка?", Intent.HEX_SCORE,
+            score_context["h3_id"], query_embedding=expected_vector,
+        )
+    )
+
+    assert result == "Оцінка з поясненням"
+
+
 def test_project_info_without_matching_knowledge_skips_groq(monkeypatch):
     async def embed(question):
         assert question == "Який бюджет Околу?"
@@ -456,6 +489,7 @@ def test_answer_intent_sends_database_pois_to_llm(monkeypatch):
             return "Біля цього гекса є стоматологія Inside Dental Center."
 
     monkeypatch.setattr(ai_assistant, "get_poi_information", get_poi_information)
+    monkeypatch.setattr(ai_assistant, "get_knowledge_fragments", AsyncMock(return_value=[]))
 
     answer = asyncio.run(
         answer_intent(
@@ -464,6 +498,7 @@ def test_answer_intent_sends_database_pois_to_llm(monkeypatch):
             "Які місця у цьому гексі?",
             Intent.POI,
             "891e76c6db3ffff",
+            query_embedding=[1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1),
         )
     )
 
