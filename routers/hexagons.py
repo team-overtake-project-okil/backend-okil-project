@@ -7,9 +7,14 @@ from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.category_narratives.service import fetch_hexagon_explanations
+from app.anchor_routes import PALETTE, style_anchor_routes
 from app.config import settings
 from app.database import get_async_db
-from app.traveltime_routes_service import TravelTimeRouteFormatError, get_traveltime_routes
+from app.traveltime_routes_service import (
+    TravelTimeRouteFormatError,
+    get_traveltime_routes,
+    use_route_specific_bus_geometry,
+)
 from app.hexagon_repository import fetch_hexagon, fetch_hexagons
 from app.mobility_score_service import get_mobility_scores
 from app.mobility_transport import LVIV_CENTER
@@ -106,6 +111,8 @@ async def get_hexagon(
     if anchor_lat is not None or anchor_lon is not None or weight is not None:
         if not anchor_lat or not anchor_lon or len(anchor_lat) != len(anchor_lon):
             raise HTTPException(status_code=400, detail="anchor_lat and anchor_lon must match")
+        if len(anchor_lat) > len(PALETTE):
+            raise HTTPException(status_code=400, detail="Select at most five route destinations")
         anchor_weights = weight or [1.0] * len(anchor_lat)
         if len(anchor_weights) != len(anchor_lat):
             raise HTTPException(status_code=400, detail="Provide one weight per anchor")
@@ -138,13 +145,15 @@ async def get_hexagon(
         if row is None:
             raise HTTPException(status_code=404, detail="Hexagon not found")
         try:
-            route_result = await get_traveltime_routes(
-                h3_id,
-                (float(row["lat"]), float(row["lon"])),
-                transportation,
-                LVIV_CENTER,
-                db=db,
-            )
+            destinations = [(lat, lon) for lat, lon, _ in anchors] if anchors else [LVIV_CENTER]
+            collections = []
+            for destination in destinations:
+                route_result = await get_traveltime_routes(
+                    h3_id, (float(row["lat"]), float(row["lon"])), transportation, destination,
+                )
+                collections.append(route_result["routes"])
+            await use_route_specific_bus_geometry(collections, db)
+            routes = style_anchor_routes(collections) if anchors else collections[0]
         except TravelTimeRouteFormatError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except ValueError as exc:
@@ -156,7 +165,6 @@ async def get_hexagon(
                 status_code=502,
                 detail=f"TravelTime API request failed ({type(exc).__name__})",
             ) from exc
-        routes = route_result["routes"]
 
     hexagon = {**hexagon, "mobility": mobility_score}
     user_weights = weights.model_dump()

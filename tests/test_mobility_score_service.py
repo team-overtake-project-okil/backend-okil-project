@@ -185,3 +185,33 @@ def test_bus_route_retries_by_fifteen_minutes_and_chooses_fastest(monkeypatch):
         "2026-11-17T14:00:00+00:00",
     ]
     assert result["routes"]["features"][0]["properties"]["label"] == "22"
+
+
+def test_bus_geometry_batches_all_collections_and_preserves_fallback():
+    from unittest.mock import AsyncMock, Mock
+
+    def collection():
+        return {"features": [{
+            "properties": {"mode": "bus", "transport_mode": "bus", "route_number": "92"},
+            "geometry": {"type": "LineString", "coordinates": [[24, 49.8], [24.01, 49.81], [24.02, 49.82]]},
+        }]}
+
+    complete, incomplete = collection(), collection()
+    original = incomplete["features"][0]["geometry"]["coordinates"].copy()
+    first = [[24, 49.8], [24.005, 49.807], [24.01, 49.81]]
+    second = [[24.01, 49.81], [24.02, 49.82]]
+    db = Mock()
+    db.execute = AsyncMock(return_value=Mock())
+    db.execute.return_value.mappings.return_value = [
+        {"feature_id": feature, "point_order": order, "missing_stop": False,
+         "route_name": name, "geojson": {"type": "LineString", "coordinates": coords}}
+        for feature, order, name, coords in [(0, 0, "53", second), (0, 0, "92", first),
+                                             (0, 1, "92", second), (1, 0, "92", first),
+                                             (1, 1, "53", second)]
+    ]
+
+    asyncio.run(route_service.use_route_specific_bus_geometry([complete, incomplete], db))
+
+    db.execute.assert_awaited_once()
+    assert complete["features"][0]["geometry"]["coordinates"] == first + second[1:]
+    assert incomplete["features"][0]["geometry"]["coordinates"] == original
