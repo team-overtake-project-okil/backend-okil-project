@@ -16,7 +16,6 @@ class Intent(str, Enum):
     MOBILITY_ROUTES = "mobility_routes"
     TOP_HEXAGONS = "top_hexagons"
     WEIGHTS_SIMULATION = "weights_simulation"
-    OUT_OF_SCOPE = "out_of_scope"
     TRANSIT_LINES = "transit_lines"
     NEIGHBORHOOD_CONTEXT = "neighborhood_context"
     INFRASTRUCTURE_GAPS = "infrastructure_gaps"
@@ -151,24 +150,6 @@ INTENT_DESCRIPTIONS: Mapping[Intent, str] = {
         "Індивідуальний підбір ваг для об'єктивної оцінки локації під власний стиль життя. "
         "Порахуй персональний індекс комфорту цієї ділянки з акцентом на мобільність і кав'ярні."
     ),
-    Intent.OUT_OF_SCOPE: (
-        "Питання про ціни на нерухомість, вартість оренди чи купівлі квартир і будинків. "
-        "Скільки коштує орендувати або купити однокімнатну квартиру в цьому гексагоні чи районі?\n\n"
-        "Інформація про забудовників, житлові комплекси (ЖК), новобудови та вторинний ринок. "
-        "Які ЖК будуються поруч? Яка ціна за квадратний метр житла на цій ділянці?\n\n"
-        "Наявність паркування, паркомісць у дворах, гаражів та автомобільних заторів. "
-        "Чи є тут де припаркувати машину біля дому? Чи сильні затори на цій вулиці в годину пік?\n\n"
-        "Велосипедна інфраструктура, велодоріжки, безбар'єрність, пандуси та інклюзивність. "
-        "Чи є в цьому районі велодоріжки? Наскільки ця ділянка безбар'єрна для візочків?\n\n"
-        "Екологічні показники поза базою даних: якість повітря, рівень шуму, радіація, чистота. "
-        "Який тут рівень шуму від дороги та загазованість повітря? Чи безпечна тут екологія?\n\n"
-        "Кримінальна ситуація, рівень злочинності, освітлення вулиць уночі та поліція. "
-        "Чи безпечно тут ходити ввечері? Яка статистика злочинності та крадіжок у цьому районі?\n\n"
-        "Комунальні тарифи, відключення світла, графіки обленерго, водопостачання та інтернет. "
-        "Яка тут черга відключень електроенергії? Чи часто в цьому будинку вимикають світло або воду?\n\n"
-        "Побутовий смолток, привітання, подяки, погода, новини та сторонні теми не про карту OKIL. "
-        "Привіт, як справи? Дякую за допомогу! Яка сьогодні погода у Львові? Хто переміг у матчі?"
-    ),
     Intent.TRANSIT_LINES: (
         "Номери маршрутів громадського транспорту, автобусів, трамваїв і тролейбусів у гексі. "
         "Які саме маршрутки, автобуси чи трамваї їздять через зупинки цієї ділянки?\n\n"
@@ -224,6 +205,26 @@ INTENT_DESCRIPTIONS: Mapping[Intent, str] = {
         "Які білі плями є в інфраструктурі цієї ділянки?"
     ),
 }
+
+_UNRELATED_EXAMPLES = (
+        "Питання про ціни на нерухомість, вартість оренди чи купівлі квартир і будинків. "
+        "Скільки коштує орендувати або купити однокімнатну квартиру в цьому гексагоні чи районі?\n\n"
+        "Інформація про забудовників, житлові комплекси (ЖК), новобудови та вторинний ринок. "
+        "Які ЖК будуються поруч? Яка ціна за квадратний метр житла на цій ділянці?\n\n"
+        "Наявність паркування, паркомісць у дворах, гаражів та автомобільних заторів. "
+        "Чи є тут де припаркувати машину біля дому? Чи сильні затори на цій вулиці в годину пік?\n\n"
+        "Велосипедна інфраструктура, велодоріжки, безбар'єрність, пандуси та інклюзивність. "
+        "Чи є в цьому районі велодоріжки? Наскільки ця ділянка безбар'єрна для візочків?\n\n"
+        "Екологічні показники поза базою даних: якість повітря, рівень шуму, радіація, чистота. "
+        "Який тут рівень шуму від дороги та загазованість повітря? Чи безпечна тут екологія?\n\n"
+        "Кримінальна ситуація, рівень злочинності, освітлення вулиць уночі та поліція. "
+        "Чи безпечно тут ходити ввечері? Яка статистика злочинності та крадіжок у цьому районі?\n\n"
+        "Комунальні тарифи, відключення світла, графіки обленерго, водопостачання та інтернет. "
+        "Яка тут черга відключень електроенергії? Чи часто в цьому будинку вимикають світло або воду?\n\n"
+        "Побутовий смолток, привітання, подяки, погода, новини та сторонні теми не про карту OKIL. "
+        "Привіт, як справи? Дякую за допомогу! Яка сьогодні погода у Львові? Хто переміг у матчі?"
+        "\n\nСкажи рецепт сирників\n\nЯк налаштувати гітару"
+)
 
 EmbeddingFunction = Callable[[str], Awaitable[Sequence[float]]]
 
@@ -283,6 +284,8 @@ class IntentClassifier:
         embed_text: EmbeddingFunction,
         intent_embeddings: Mapping[Intent, Sequence[float]],
         min_similarity: float | None = DEFAULT_MIN_SIMILARITY,
+        *,
+        unrelated_embeddings: Sequence[Sequence[float]] = (),
     ) -> None:
         if min_similarity is not None and not -1.0 <= min_similarity <= 1.0:
             raise ValueError("min_similarity must be between -1 and 1")
@@ -299,6 +302,12 @@ class IntentClassifier:
             raise ValueError("All intent embeddings must have the same dimensions")
         self._dimensions = dimensions.pop()
         self._min_similarity = min_similarity
+        self._unrelated_embeddings = tuple(
+            _validated_vector(vector, label="unrelated example")
+            for vector in unrelated_embeddings
+        )
+        if any(len(vector) != self._dimensions for vector in self._unrelated_embeddings):
+            raise ValueError("Unrelated and intent embeddings must have the same dimensions")
 
     @classmethod
     async def create(
@@ -316,6 +325,7 @@ class IntentClassifier:
             for intent, description in INTENT_DESCRIPTIONS.items()
         }
         texts = [text for parts in scenarios.values() for text in parts]
+        texts.extend(_UNRELATED_EXAMPLES.split("\n\n"))
         if embed_many is None:
             encoded = [await embed_text(text) for text in texts]
         else:
@@ -341,7 +351,7 @@ class IntentClassifier:
                 math.fsum(vector[index] for vector in normalized) / len(normalized)
                 for index in range(len(normalized[0]))
             )
-        return cls(embed_text, embeddings, min_similarity)
+        return cls(embed_text, embeddings, min_similarity, unrelated_embeddings=tuple(encoded_iter))
 
     async def classify(self, query: str) -> IntentMatch:
         if not query.strip():
@@ -363,8 +373,9 @@ class IntentClassifier:
         best_intent = max(scores, key=scores.__getitem__)
         best_similarity = scores[best_intent]
         if (
-            self._min_similarity is not None
-            and best_similarity < self._min_similarity
+            (self._min_similarity is not None and best_similarity < self._min_similarity)
+            or any(_cosine_similarity(query_embedding, vector) > best_similarity
+                   for vector in self._unrelated_embeddings)
         ):
             best_intent = None
 

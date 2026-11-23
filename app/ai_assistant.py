@@ -649,13 +649,6 @@ async def answer_intent(
         context = await get_project_information(db, query_embedding)
         if not context["knowledge_fragments"]:
             return PROJECT_KNOWLEDGE_MISSING
-    elif intent == Intent.OUT_OF_SCOPE or intent == "out_of_scope":
-        return (
-            "Проєкт OKIL оцінює міське середовище виключно за 8 інфраструктурними "
-            "категоріями: Мобільність, Щоденні потреби, Здоров'я, Освіта, Дозвілля, "
-            "Спорт, Їжа та Безпека. Дані про вартість нерухомості, паркування, затори, "
-            "велодоріжки чи стан довкілля в системі не розраховуються."
-        )
     elif intent == Intent.TRANSIT_LINES or intent == "transit_lines":
         if not h3_id:
             raise ValueError("An H3 ID is required to check transit lines.")

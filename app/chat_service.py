@@ -137,7 +137,6 @@ class ChatAIService:
         parts = self._resolved_parts(parsed)
         return bool(parts) and all(
             intent is not None
-            and intent.value != "out_of_scope"
             and (cell is not None or intent.value not in HEX_CONTEXT_INTENTS)
             for _, intent in parts
         )

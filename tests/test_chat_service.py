@@ -415,7 +415,6 @@ def test_category_faq_correction_does_not_override_cell_or_place_questions(quest
     (Intent.POI, None, None),
     (Intent.SCORE, None, None),
     (AssistantIntent.TRANSIT_LINES, None, None),
-    (AssistantIntent.OUT_OF_SCOPE, CELL, None),
     (Intent.POI, CELL, "Які місця є в цій ділянці?"),
 ])
 def test_next_prompt_requiring_missing_context_is_omitted(monkeypatch, intent, cell, expected):

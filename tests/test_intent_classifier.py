@@ -94,13 +94,16 @@ def test_rejects_query_embedding_with_wrong_dimensions():
         asyncio.run(classifier.classify("питання користувача"))
 
 
-def test_create_embeds_each_scenario_once_and_reuses_centroids():
+def test_create_embeds_each_scenario_once_and_reuses_centroids(monkeypatch):
+    monkeypatch.setattr("app.intent_classifier._UNRELATED_EXAMPLES", "unrelated scenario")
     calls = []
 
     async def embed_text(text):
         calls.append(text)
         if text == "нове запитання":
             return [1.0] + [0.0] * (EMBEDDING_DIMENSIONS - 1)
+        if text == "unrelated scenario":
+            return [0.0] * (EMBEDDING_DIMENSIONS - 1) + [1.0]
         intent = next(
             intent
             for intent, description in INTENT_DESCRIPTIONS.items()
@@ -120,7 +123,8 @@ def test_create_embeds_each_scenario_once_and_reuses_centroids():
         for scenario in description.split("\n\n")
     ]
     assert all(calls.count(scenario) == 1 for scenario in scenarios)
-    assert len(calls) == len(scenarios) + 1
+    assert calls.count("unrelated scenario") == 1
+    assert len(calls) == len(scenarios) + 2
 
 
 def test_create_preserves_later_scenarios_and_normalizes_each(monkeypatch):
@@ -136,7 +140,9 @@ def test_create_preserves_later_scenarios_and_normalizes_each(monkeypatch):
             if intent not in {Intent.POI, Intent.HEX_SCORE, Intent.PROJECT_INFO}
         },
     })
+    monkeypatch.setattr("app.intent_classifier._UNRELATED_EXAMPLES", "unrelated scenario")
     vectors = {
+        "unrelated scenario": [0.0, -1.0, 0.0],
         "first scenario": [100.0, 0.0, 0.0],
         "last scenario": [0.0, 1.0, 0.0],
         "score scenario": [-1.0, 0.0, 0.0],
@@ -166,6 +172,21 @@ def test_create_rejects_inconsistent_scenario_dimensions(monkeypatch):
 
     with pytest.raises(ValueError, match="matching embedding dimensions"):
         asyncio.run(IntentClassifier.create(embed_text))
+
+
+def test_unrelated_example_can_reject_a_match_above_threshold():
+    query_embedding = [0.8, 0.6] + [0.0] * (EMBEDDING_DIMENSIONS - 2)
+
+    async def embed_text(_text):
+        return query_embedding
+
+    classifier = IntentClassifier(
+        embed_text, intent_test_vectors(), unrelated_embeddings=[query_embedding],
+    )
+    match = asyncio.run(classifier.classify("Test query"))
+
+    assert match.intent is None
+    assert match.similarity == pytest.approx(0.8)
 
 
 def test_parse_query_separates_supported_and_unrelated_parts():
