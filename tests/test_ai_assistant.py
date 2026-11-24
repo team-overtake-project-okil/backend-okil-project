@@ -117,6 +117,11 @@ def test_get_poi_information_reads_points_and_stops():
     assert result["objects"][0]["type_name"] == "Кафе"
     assert result["truncated"] is False
     assert len(db.statements) == 2
+    for statement in db.statements:
+        sql = str(statement)
+        assert "ST_DWithin" in sql
+        assert "point_types.radius_of_influence_3" in sql
+        assert "hex_table.geom" in sql
 
 
 def test_format_poi_answer_reports_no_stops_when_database_has_none():
@@ -158,7 +163,7 @@ def test_format_poi_answer_handles_empty_hex():
         }
     )
 
-    assert answer == "У гексі 891e76c6db3ffff у базі не знайдено POI або зупинок."
+    assert answer == "У межах радіусів пошуку навколо 891e76c6db3ffff не знайдено місць або зупинок."
 
 
 def test_get_project_information_selects_only_relevant_knowledge_text():
@@ -580,6 +585,13 @@ def test_top_hexagons_uses_final_rating_for_every_candidate(monkeypatch):
     assert result["top_hexagons"][0]["h3_id"] == "balanced"
     assert result["top_hexagons"][0]["overall_rating"] == 80
     assert len(db.statements) == 1
+
+    weights = ai_assistant.extract_simulated_weights("лише освіта")
+    weighted = asyncio.run(ai_assistant.get_top_hexagons_information(
+        FakeDatabase([FakeResult(rows)]), limit=1, user_weights=weights
+    ))
+    assert weighted["top_hexagons"][0]["overall_rating"] == 100
+    assert weighted["top_hexagons"][0]["h3_id"] != "balanced"
 
 
 def test_infrastructure_gaps_use_all_point_and_stop_types(monkeypatch):

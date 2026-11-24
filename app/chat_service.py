@@ -9,6 +9,7 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.exc import DBAPIError
 
 from app.chat_sessions import ChatTurn
+from app.chat_dialogue import NEED_CELL, resolve
 
 REPLY_TIMEOUT_SECONDS = 30
 NEXT_PROMPT_TIMEOUT_SECONDS = 3.0
@@ -141,12 +142,53 @@ class ChatAIService:
             for _, intent in parts
         )
 
-    async def reply(self, text: str, history: Sequence[ChatTurn]) -> str:
+    async def reply(self, text: str, history: Sequence[ChatTurn], *, state=None, on_part=None, user_weights=None, mobility=None) -> str:
         # The map adds a context header, not extra questions. Never trust its
         # supplied scores: answer_intent fetches the actual facts from the DB.
-        question = _question_text(text)
-        parsed = await self.classifier.parse_query(question)
-        parts = self._resolved_parts(parsed)
+        resolved = resolve(_question_text(text), history)
+        if resolved.answer:
+            if state is not None:
+                state["social"] = True
+            return resolved.answer
+        question = resolved.question
+        if (not resolved.intent and hasattr(type(self.client), "dialogue_choice")
+                and len(question.split()) <= 8 and not H3_ID_PATTERN.search(question)):
+            previous = next((t for t in reversed(history) if not t.get("social")), {})
+            choices = {"greet": "тільки привітання", "thanks": "тільки подяка",
+                       "unrelated": "суто сторонній запит поза OKIL, картою, міським середовищем, "
+                                    "місцями, транспортом, ділянками та їх оцінками"}
+            if previous.get("offerIntent"):
+                choices["confirm"] = "згода виконати щойно запропоновану дію"
+            if previous.get("activeIntent") == "top_hexagons":
+                choices.update(worst="ті самі гекси з найнижчими оцінками",
+                               best="ті самі гекси з найвищими оцінками")
+            try:
+                choice = await self.client.dialogue_choice(question, choices)
+            except Exception as exc:
+                logger.info("Dialogue classification skipped (%s)", type(exc).__name__)
+                choice = "other"
+            equivalents = {"greet": "привіт", "thanks": "дякую", "confirm": "так",
+                           "worst": "і найгірших", "best": "і найкращих"}
+            if choice == "unrelated":
+                return UNRELATED_REPLY
+            if choice in choices:
+                resolved = resolve(equivalents[choice], history)
+                if resolved.answer:
+                    if state is not None:
+                        state["social"] = True
+                    return resolved.answer
+                question = resolved.question
+        query_embeddings = {}
+        if resolved.intent:
+            from app.intent_classifier import Intent
+            parts = [(question, Intent(resolved.intent))]
+        else:
+            parsed = await self.classifier.parse_query(question)
+            parts = self._resolved_parts(parsed)
+            query_embeddings = {
+                part.text: getattr(part.match, "embedding", None)
+                for part in parsed.relevant_parts
+            }
         if not parts:
             return UNRELATED_REPLY
 
@@ -160,18 +202,19 @@ class ChatAIService:
                 merged_parts.append((part_text, intent))
         parts = merged_parts
 
+        if state is not None and len(parts) == 1:
+            state.update(activeQuestion=parts[0][0], activeIntent=parts[0][1].value)
+
         needs_hex = any(intent.value in HEX_CONTEXT_INTENTS for _, intent in parts)
         cell = hex_context(text, history) if needs_hex else None
         if needs_hex and cell is None:
+            if state is not None and "activeQuestion" in state:
+                return NEED_CELL
             raise ChatReplyError(
                 "context_required",
                 "Додайте H3 ID ділянки до запитання про її оцінку або місця.",
             )
 
-        query_embeddings = {
-            part.text: getattr(part.match, "embedding", None)
-            for part in parsed.relevant_parts
-        }
         answers = []
         async with _connected_session(self.session_factory) as db:
             for part_text, intent in parts:
@@ -181,12 +224,19 @@ class ChatAIService:
                     if intent.value == "project_info" and query_embedding is not None
                     else {}
                 )
+                if intent.value == "top_hexagons":
+                    if user_weights is not None:
+                        kwargs["user_weights"] = user_weights
+                    if mobility is not None:
+                        kwargs["mobility"] = mobility
                 answer = await self.answer_intent(
                     db, self.client, part_text, intent, cell, **kwargs
                 )
                 if not isinstance(answer, str) or not answer.strip():
                     raise ChatReplyError("ai_failed", "AI-сервіс не повернув текст відповіді. Спробуйте ще раз.")
                 answers.append(answer.strip())
+                if on_part is not None:
+                    await on_part(("\n\n" if len(answers) > 1 else "") + answers[-1])
         return "\n\n".join(answers)
 
 
@@ -230,11 +280,16 @@ async def preload_ai() -> None:
         pass
 
 
-async def generate_reply(text: str, history: Sequence[ChatTurn]) -> str:
+async def generate_reply(text: str, history: Sequence[ChatTurn], **options) -> str:
     """Return #69's answer using its supported question, intent and H3 context."""
     try:
+        resolved = resolve(_question_text(text), history)
+        if resolved.answer:
+            if options.get("state") is not None:
+                options["state"]["social"] = True
+            return resolved.answer
         service = await _get_service()
-        return await service.reply(text, history)
+        return await service.reply(text, history, **options)
     except ChatReplyError:
         raise
     except Exception as exc:
@@ -278,6 +333,7 @@ async def generate_next_prompt(
     history: Sequence[ChatTurn],
     *,
     timeout_seconds: float = NEXT_PROMPT_TIMEOUT_SECONDS,
+    state=None,
 ) -> str | None:
     """Best-effort enrichment; a provider failure must never discard a ready answer."""
     if timeout_seconds <= 0 or answer == UNRELATED_REPLY:
@@ -295,7 +351,28 @@ async def generate_next_prompt(
             suggestion = _validated_next_prompt(
                 suggestion, [question, *previous_questions, *previous_suggestions]
             )
-            if suggestion is None or not await service.supports_next_prompt(suggestion, cell):
+            if suggestion is None:
+                return None
+            if state is not None:
+                candidate = resolve(suggestion, history)
+                if candidate.answer:
+                    return None
+                if candidate.intent:
+                    if candidate.intent in HEX_CONTEXT_INTENTS and not cell:
+                        return None
+                    state.update(offerQuestion=candidate.question, offerIntent=candidate.intent)
+                else:
+                    parsed = await service.classifier.parse_query(suggestion)
+                    parts = service._resolved_parts(parsed)
+                    if parsed.unrelated_parts or len(parts) != 1:
+                        return None
+                    part, intent = parts[0]
+                    if intent.value in HEX_CONTEXT_INTENTS and not cell:
+                        return None
+                    if any(h.lower() != cell for h in H3_ID_PATTERN.findall(part)):
+                        return None
+                    state.update(offerQuestion=part, offerIntent=intent.value)
+            elif not await service.supports_next_prompt(suggestion, cell):
                 return None
             return suggestion
     except Exception as exc:

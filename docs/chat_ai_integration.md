@@ -302,3 +302,24 @@ Source/config backups before assembly are under the workspace
 `work/chat74-assembly-backup`, outside both repositories. The backup excludes
 secrets and records previous local URL/settings for a scoped rollback. No
 commits or pushes were made.
+### Поступова відповідь та відновлення сесії
+
+Для рейтингу за поточними налаштуваннями карти передавайте в `message.send`
+поле `weights`, наприклад `{"health": 5, "study": 0, "daily": 2}`.
+Назви й діапазон ваг збігаються з API карти. Пропущені категорії мають вагу 1.
+Параметри мобільності того самого запиту передаються в `mobility`, наприклад
+`{"transportation":"bus","anchor_lat":[49.84],"anchor_lon":[24.03],"weight":[1]}`.
+Якщо карта використовує стандартні налаштування транспорту, поле можна пропустити.
+Для топу й найгірших ділянок сервер сортує оцінки зі спільної реалізації `GET /hexagons`.
+
+Клієнт може передати `"stream": true` у події `message.send`. Для кожного готового
+фрагмента сервер надсилає `answer.delta` з `requestId` та `text`. Додавайте текст
+до однієї бульбашки за цим ID. Після `answer.completed` замініть її вміст повним
+текстом відповіді. Короткі відповіді та повторно надіслані готові результати
+можуть одразу приходити як `answer.completed`. Після `error` позначайте відповідь
+незавершеною та очищуйте частковий текст при повторній спробі.
+
+Показуйте власну репліку одразу після натискання Enter. При відновленні сесії
+необов’язкове поле `session.ready.pending` містить `requestId`, `question` і
+`status` (`generating` або `interrupted`). Для перерваної репліки можна повторити
+`message.send` з тим самим ID та текстом.

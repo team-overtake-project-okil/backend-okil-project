@@ -1,0 +1,68 @@
+--- a/src/components/map.tsx
++++ b/src/components/map.tsx
+@@ -110,6 +110,7 @@
+       aria-labelledby="map-heading"
+     >
+       <Chat
++        assessmentWeights={ratings.assessmentWeights}
+         open={chatOpen}
+         onOpenChange={setChatOpen}
+         host={chatHost}
+--- a/src/components/Chat.tsx
++++ b/src/components/Chat.tsx
+@@ -39,8 +39,8 @@
+   status: "generating" | "interrupted";
+ };
+ 
+-function sendTurn(socket: WebSocket, requestId: string, text: string) {
+-  socket.send(JSON.stringify({ type: "message.send", requestId, text, stream: true }));
++function sendTurn(socket: WebSocket, requestId: string, text: string, weights?: AssessmentWeights | null) {
++  socket.send(JSON.stringify({ type: "message.send", requestId, text, stream: true, weights: weights ?? undefined }));
+ }
+ 
+ type ChatEvent =
+@@ -89,7 +89,10 @@
+   return <>{visible}</>;
+ }
+ 
++import type { AssessmentWeights } from "../lib/assessmentWeights";
++
+ export function Chat({
++  assessmentWeights,
+   open,
+   onOpenChange: setOpen,
+   host,
+@@ -103,6 +106,7 @@
+   host: HTMLDivElement | null;
+   selectedContext: HexChatContext | null;
+   attachedContext: HexChatContext | null;
++  assessmentWeights?: AssessmentWeights | null;
+   onContextChange: (context: HexChatContext | null) => void;
+   renderClearHistory?: (controls: ClearChatHistoryControls) => ReactNode;
+ }) {
+@@ -144,6 +148,7 @@
+   const [ready, setReady] = useState(false);
+   const [waiting, setWaiting] = useState(false);
+   const [status, setStatus] = useState("Підключаємося…");
++  const appliedWeights = useEffectEvent(() => assessmentWeights);
+   const resetContext = useEffectEvent(() => onContextChange(null));
+ 
+   useEffect(() => {
+@@ -210,7 +215,7 @@
+             setWaiting(Boolean(pending));
+             setTurns(pending ? [...history, { requestId: pending.requestId, question: pending.question, live: true }] : history);
+             if (pending?.status === "interrupted") {
+-              sendTurn(socket, pending.requestId, pending.question);
++              sendTurn(socket, pending.requestId, pending.question, appliedWeights());
+             } else if (pending) {
+               refresh = setTimeout(() => {
+                 if (socket.readyState === WebSocket.OPEN)
+@@ -395,7 +400,7 @@
+       );
+       return;
+     }
+-    sendTurn(socket, requestId, message);
++    sendTurn(socket, requestId, message, assessmentWeights);
+ 
+     setTurns((current) => [...current, { requestId, question: message, live: true }]);
+     setText("");

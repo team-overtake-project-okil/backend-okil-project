@@ -51,6 +51,10 @@ async def get_hexagons(
     weight: list[float] | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
+    return await rate_all_hexagons(db, weights, transportation, anchor_lat, anchor_lon, weight)
+
+
+async def rate_all_hexagons(db, weights, transportation="bus", anchor_lat=None, anchor_lon=None, weight=None):
     if not settings.EXTERNAL_TRANSPORT_ENABLED:
         weights = weights.model_copy(update={"mobility": 0.0})
     hexagons = await fetch_hexagons(db)

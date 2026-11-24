@@ -19,11 +19,18 @@ class ChatTurn(TypedDict):
     question: str
     answer: str
     nextPrompt: NotRequired[str]
+    activeQuestion: NotRequired[str]
+    activeIntent: NotRequired[str]
+    offerQuestion: NotRequired[str]
+    offerIntent: NotRequired[str]
+    social: NotRequired[bool]
 
 
 class PendingReply(TypedDict):
     attempt: str
     deadline: float
+    requestId: NotRequired[str]
+    question: NotRequired[str]
 
 
 class ChatSession(TypedDict):
@@ -61,11 +68,14 @@ class ChatSessionStore:
             if created:
                 return token
 
-    async def history(self, token: str) -> list[ChatTurn]:
+    async def snapshot(self, token: str) -> ChatSession:
         raw = await self.redis.get(self._key(token))
         if raw is None:
             raise ChatSessionError("session_expired", "This chat session has expired.")
-        return json.loads(raw)["history"]
+        return json.loads(raw)
+
+    async def history(self, token: str) -> list[ChatTurn]:
+        return (await self.snapshot(token))["history"]
 
     async def clear(self, token: str) -> bool:
         if not isinstance(token, str) or not SESSION_TOKEN_PATTERN.fullmatch(token):
@@ -118,7 +128,10 @@ class ChatSessionStore:
             pending = session["pending"]
             if pending and pending["deadline"] > now:
                 raise ChatSessionError("busy", "A reply is already being prepared.")
-            session["pending"] = {"attempt": attempt, "deadline": now + lease_seconds}
+            if pending and pending.get("requestId") == request_id and pending.get("question") != question:
+                raise ChatSessionError("request_id_reused", "Use a new requestId for a new question.")
+            session["pending"] = {"attempt": attempt, "deadline": now + lease_seconds,
+                                  "requestId": request_id, "question": question}
             return session["history"], None
 
         return await self._update(token, claim)
@@ -137,6 +150,6 @@ class ChatSessionStore:
         def release(session: ChatSession) -> None:
             pending = session["pending"]
             if pending and pending["attempt"] == attempt:
-                session["pending"] = None
+                pending["deadline"] = 0
 
         await self._update(token, release, refresh_ttl=False)
