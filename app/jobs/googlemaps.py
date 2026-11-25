@@ -444,6 +444,7 @@ async def main(
     cache_file: str | None = None,
     cache_only: bool = False,
     force: bool = False,
+    strict_leisure: bool | None = None,
 ):
     specs = _select_poi_specs(only_types)
     required_types = {poi["type"]: poi["category"] for poi in specs}
@@ -495,14 +496,22 @@ async def main(
 
             valid_by_type = Counter(p["type"] for p in valid)
             strict_types = {poi["type"] for poi in specs if "filter" in poi}
-            if not force:
-                for tp in sorted(strict_types):
-                    if valid_by_type.get(tp, 0) == 0:
-                        raise RuntimeError(
-                            f"Для типу '{tp}' після H3-фільтрації залишилось 0 точок; "
-                            "запис скасовано (використайте --force, якщо це очікувано)."
-                        )
-
+            enforce_strict = (
+                bool(only_types) if strict_leisure is None else strict_leisure
+            ) and not force
+            missing_strict = [
+                tp for tp in sorted(strict_types) if valid_by_type.get(tp, 0) == 0
+            ]
+            if missing_strict:
+                if enforce_strict:
+                    raise RuntimeError(
+                        f"Для типу '{missing_strict[0]}' після H3-фільтрації залишилось 0 точок; "
+                        "запис скасовано (використайте --force, якщо це очікувано)."
+                    )
+                print(
+                    "⚠️ Типи дозвілля без точок у цьому запуску (продовжую імпорт): "
+                    + ", ".join(missing_strict)
+                )
             points_to_insert = [
                 {
                     "source": SOURCE_NAME,
