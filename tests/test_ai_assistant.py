@@ -1,8 +1,10 @@
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from contextlib import nullcontext
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from app import ai_assistant
 from app.ai_assistant import (
@@ -33,6 +35,8 @@ class FakeResult:
 
 
 class FakeDatabase:
+    bind = None
+
     def __init__(self, results):
         self._results = iter(results)
         self.statements = []
@@ -188,7 +192,7 @@ def test_project_definition_uses_verified_overview_without_db_or_groq(question):
     assert "за власними пріоритетами" in result
 
 
-def test_project_methodology_question_passes_retrieved_text_to_groq():
+def test_project_methodology_question_passes_retrieved_text_to_groq(monkeypatch):
     class Client:
         async def answer(self, question, intent, context):
             assert intent is Intent.PROJECT_INFO
@@ -196,12 +200,46 @@ def test_project_methodology_question_passes_retrieved_text_to_groq():
             return "Пояснення радіусів"
 
     db = FakeDatabase([FakeResult([{"text": "Перший радіус дає максимальний бал типу."}])])
+    monkeypatch.setattr(ai_assistant, "AsyncSession", lambda *, bind: nullcontext(db))
     vector = [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
     result = asyncio.run(
         answer_intent(db, Client(), "Як працюють радіуси в Околі?", Intent.PROJECT_INFO,
                       query_embedding=vector)
     )
     assert result == "Пояснення радіусів"
+
+
+def test_hex_score_also_receives_relevant_vector_knowledge(monkeypatch):
+    expected_vector = [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
+    score_context = {"h3_id": "8928308280bffff", "overall_rating": 72, "categories": []}
+
+    async def get_hex_information(db, h3_id):
+        assert h3_id == score_context["h3_id"]
+        return dict(score_context)
+
+    async def get_knowledge_fragments(db, vector):
+        assert vector == expected_vector
+        return ["Нульовий бал активної категорії може знизити загальну оцінку."]
+
+    class Client:
+        async def answer(self, question, intent, context):
+            assert intent is Intent.HEX_SCORE
+            assert context["overall_rating"] == 72
+            assert context["knowledge_fragments"] == [
+                "Нульовий бал активної категорії може знизити загальну оцінку."
+            ]
+            return "Оцінка з поясненням"
+
+    monkeypatch.setattr(ai_assistant, "get_hex_information", get_hex_information)
+    monkeypatch.setattr(ai_assistant, "get_knowledge_fragments", get_knowledge_fragments)
+    result = asyncio.run(
+        answer_intent(
+            FakeDatabase([]), Client(), "Чому така оцінка?", Intent.HEX_SCORE,
+            score_context["h3_id"], query_embedding=expected_vector,
+        )
+    )
+
+    assert result == "Оцінка з поясненням"
 
 
 def test_project_info_without_matching_knowledge_skips_groq(monkeypatch):
@@ -211,8 +249,34 @@ def test_project_info_without_matching_knowledge_skips_groq(monkeypatch):
 
     monkeypatch.setattr(ai_assistant, "create_embedder", lambda: embed)
     db = FakeDatabase([FakeResult([])])
+    monkeypatch.setattr(ai_assistant, "AsyncSession", lambda *, bind: nullcontext(db))
     result = asyncio.run(answer_intent(db, object(), "Який бюджет Околу?", Intent.PROJECT_INFO))
     assert result == ai_assistant.PROJECT_KNOWLEDGE_MISSING
+
+
+@pytest.mark.parametrize("intent,service,context", [
+    (Intent.HEX_SCORE, "get_hex_information", {"overall_rating": 72}),
+    (Intent.POI, "get_poi_information", {"objects": [{"name": "Школа"}]}),
+    (Intent.TRANSIT_LINES, "get_transit_lines_information", {"routes": ["3А"]}),
+])
+def test_failed_vector_query_keeps_structured_answer(monkeypatch, intent, service, context):
+    primary_db = FakeDatabase([])
+    lookup_db = FakeDatabase([])
+    structured = AsyncMock(return_value=context)
+    search = AsyncMock(side_effect=DBAPIError(None, None, RuntimeError(), connection_invalidated=True))
+    client = Mock(answer=AsyncMock(return_value="Відповідь"))
+    monkeypatch.setattr(ai_assistant, "AsyncSession", lambda *, bind: nullcontext(lookup_db))
+    monkeypatch.setattr(ai_assistant, service, structured)
+    monkeypatch.setattr(ai_assistant, "get_knowledge_fragments", search)
+
+    cell = "8928308280bffff"
+    vector = [1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1)
+    result = asyncio.run(answer_intent(primary_db, client, "Запит", intent, cell, query_embedding=vector))
+
+    assert result == "Відповідь"
+    structured.assert_awaited_once_with(primary_db, cell)
+    search.assert_awaited_once_with(lookup_db, vector)
+    assert client.answer.await_args.args[2] == {**context, "knowledge_fragments": []}
 
 
 def test_groq_sends_context_and_returns_answer(monkeypatch):
@@ -456,14 +520,16 @@ def test_answer_intent_sends_database_pois_to_llm(monkeypatch):
             return "Біля цього гекса є стоматологія Inside Dental Center."
 
     monkeypatch.setattr(ai_assistant, "get_poi_information", get_poi_information)
+    monkeypatch.setattr(ai_assistant, "get_knowledge_fragments", AsyncMock(return_value=[]))
 
     answer = asyncio.run(
         answer_intent(
-            object(),
+            FakeDatabase([]),
             FakeGroq(),
             "Які місця у цьому гексі?",
             Intent.POI,
             "891e76c6db3ffff",
+            query_embedding=[1.0] + [0.0] * (ai_assistant.EMBEDDING_DIMENSIONS - 1),
         )
     )
 

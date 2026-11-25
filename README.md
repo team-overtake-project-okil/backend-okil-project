@@ -103,6 +103,11 @@ python -m app.export_ai_knowledge --output okil_knowledge.jsonl
 See [ingestion instructions](docs/ai_knowledge_ingestion.md) for the record format,
 embedding dimensions and the remaining retrieval integration.
 
+For factual records about Lviv facilities and public spaces, use the separate
+[spike data ingestion workflow](docs/spike_data_ingestion.md). It validates
+source rows, writes a reviewable JSONL snapshot, and provides a read-only
+semantic search that returns source metadata with each match.
+
 The knowledge table stores 1024-dimensional BGE-M3 vectors. See the
 [Cloudflare setup and database migration](docs/embedding_setup.md).
 
