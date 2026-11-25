@@ -34,6 +34,8 @@ PROJECT_DEFINITION_QUESTION = re.compile(
 )
 
 SYSTEM_PROMPT = (
+    "Якщо категорія mobility має enabled=false, її оцінка не врахована в загальному рейтингу. "
+    "Не трактуй її нульове значення як погану мобільність: дані можуть бути недоступні. "
     "Ти помічник проєкту OKIL, який пояснює дані про гекси, місця та проєкт. "
     "Відповідай українською, одразу дай відповідь на запит, потім коротко наведи "
     "лише потрібні факти. Не переписуй весь JSON і не починай з довгого вступу. "
@@ -256,15 +258,15 @@ async def get_hex_information(
     if hexagon is None:
         return None
 
-    if getattr(settings, "EXTERNAL_TRANSPORT_ENABLED", True):
+    weights = dict(user_weights) if user_weights is not None else HexagonWeights().model_dump()
+    if weights.get("mobility", 0) > 0 and getattr(settings, "EXTERNAL_TRANSPORT_ENABLED", True):
         try:
             mobility_scores = await get_mobility_scores([h3_id])
             if h3_id in mobility_scores:
                 hexagon["mobility"] = round(mobility_scores[h3_id])
-        except Exception:
+        except (RuntimeError, httpx.HTTPError):
             pass
 
-    weights = dict(user_weights) if user_weights is not None else HexagonWeights().model_dump()
     if "mobility" not in hexagon:
         weights["mobility"] = 0.0
 

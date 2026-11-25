@@ -11,7 +11,8 @@ from sqlalchemy.exc import DBAPIError
 from app.chat_sessions import ChatTurn
 from app.chat_dialogue import NEED_CELL, resolve
 
-REPLY_TIMEOUT_SECONDS = 30
+# Allow up to a minute for TravelTime and leave time to generate the reply.
+REPLY_TIMEOUT_SECONDS = 90
 NEXT_PROMPT_TIMEOUT_SECONDS = 3.0
 MAX_NEXT_PROMPT_LENGTH = 240
 UNRELATED_REPLY = "Я допомагаю з питаннями про OKIL, оцінки ділянок і місця в них. Уточніть запитання."

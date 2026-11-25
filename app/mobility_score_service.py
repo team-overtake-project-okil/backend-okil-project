@@ -1,3 +1,4 @@
+import asyncio
 import math
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -10,6 +11,7 @@ from app.request_timing import timed_stage
 from app.mobility_transport import LVIV_CENTER, mobility_modes
 
 TRAVELTIME_URL = "https://api.traveltimeapp.com/v4/h3"
+MOBILITY_SCORE_TIMEOUT_SECONDS = 60.0
 
 
 def _departure_times() -> list[datetime]:
@@ -50,10 +52,23 @@ async def get_mobility_scores(
     transportation: str = "bus",
     anchors: list[tuple[float, float, float]] | None = None,
 ) -> dict[str, float]:
+    # Leave time for the chat to generate an answer if TravelTime stalls.
+    try:
+        return await asyncio.wait_for(
+            _fetch_mobility_scores(hex_ids, transportation, anchors),
+            timeout=MOBILITY_SCORE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise RuntimeError("TravelTime mobility scoring timed out") from exc
+
+
+async def _fetch_mobility_scores(
+    hex_ids: list[str],
+    transportation: str,
+    anchors: list[tuple[float, float, float]] | None,
+) -> dict[str, float]:
     if not hex_ids:
         return {}
-    if not settings.TRAVELTIME_API_KEY or not settings.TRAVELTIME_APP_ID:
-        raise RuntimeError("TravelTime API credentials are not configured")
 
     anchors = anchors or [(LVIV_CENTER[0], LVIV_CENTER[1], 1.0)]
     if any(
@@ -63,6 +78,8 @@ async def get_mobility_scores(
         raise ValueError("anchor coordinates and weights must be finite; weights must be positive")
 
     modes = mobility_modes(transportation)
+    if not settings.TRAVELTIME_API_KEY or not settings.TRAVELTIME_APP_ID:
+        raise RuntimeError("TravelTime API credentials are not configured")
     departures = _departure_times()
     headers = {
         "Content-Type": "application/json",
@@ -87,7 +104,7 @@ async def get_mobility_scores(
                 }
                 for index, departure in enumerate(departures)
             ]
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=MOBILITY_SCORE_TIMEOUT_SECONDS) as client:
                 with timed_stage("traveltime.http") as timing:
                     response = await client.post(
                         TRAVELTIME_URL,
@@ -101,9 +118,13 @@ async def get_mobility_scores(
                     if mode == "bus"
                     else settings.TRAVELTIME_CAR_FULL_SCORE_SECONDS
                 )
-                scores_by_mode.append(
-                    _scores_by_search(response.json(), tau, full_score_seconds)
-                )
+                try:
+                    scores = _scores_by_search(response.json(), tau, full_score_seconds)
+                    if any(search["id"] not in scores for search in searches):
+                        raise RuntimeError("TravelTime returned incomplete mobility scores")
+                    scores_by_mode.append(scores)
+                except (ValueError, TypeError, AttributeError) as exc:
+                    raise RuntimeError("TravelTime returned invalid mobility scores") from exc
 
         per_anchor = {}
         for hex_id in hex_ids:
