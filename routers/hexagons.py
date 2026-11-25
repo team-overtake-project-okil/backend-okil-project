@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from typing import Annotated
 
 import httpx
@@ -24,22 +26,8 @@ from app.scoring import calculate_category_ratings, calculate_overall_rating
 
 
 router = APIRouter(prefix="/hexagons", tags=["hexagons"])
-
-
-def _traveltime_error_detail(error: httpx.HTTPStatusError) -> str:
-    try:
-        body = error.response.json()
-    except ValueError:
-        body = {}
-    message = " ".join(
-        body[key].strip()
-        for key in ("title", "cause", "code", "error_description")
-        if isinstance(body, dict)
-        and isinstance(body.get(key), str)
-        and body[key].strip()
-    )
-    detail = f"TravelTime API returned HTTP {error.response.status_code}"
-    return f"{detail}: {message[:300]}" if message else detail
+logger = logging.getLogger(__name__)
+ROUTE_LOOKUP_TIMEOUT_SECONDS = 60.0
 
 
 @router.get("", response_model=list[HexagonRatingResponse])
@@ -51,6 +39,10 @@ async def get_hexagons(
     weight: list[float] | None = Query(default=None),
     db: AsyncSession = Depends(get_async_db),
 ):
+    return await rate_all_hexagons(db, weights, transportation, anchor_lat, anchor_lon, weight)
+
+
+async def rate_all_hexagons(db, weights, transportation="bus", anchor_lat=None, anchor_lon=None, weight=None):
     if not settings.EXTERNAL_TRANSPORT_ENABLED:
         weights = weights.model_copy(update={"mobility": 0.0})
     hexagons = await fetch_hexagons(db)
@@ -71,12 +63,13 @@ async def get_hexagons(
             mobility_scores = await get_mobility_scores(
                 [str(hexagon["h3_id"]) for hexagon in hexagons], transportation, anchors
             )
+            if hexagons and not mobility_scores:
+                weights = weights.model_copy(update={"mobility": 0.0})
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="TravelTime API request failed") from exc
+        except (RuntimeError, httpx.HTTPError) as exc:
+            logger.warning("Mobility scoring unavailable (%s); excluding mobility", type(exc).__name__)
+            weights = weights.model_copy(update={"mobility": 0.0})
 
     user_weights = weights.model_dump()
     return [
@@ -121,20 +114,24 @@ async def get_hexagon(
             for lat, lon, anchor_weight in zip(anchor_lat, anchor_lon, anchor_weights)
         ]
     mobility_score = 0.0
+    transport_available = settings.EXTERNAL_TRANSPORT_ENABLED
     if weights.mobility > 0:
         try:
-            mobility_score = (await get_mobility_scores([h3_id], transportation, anchors)).get(h3_id, 0.0)
+            scores = await get_mobility_scores([h3_id], transportation, anchors)
+            if h3_id not in scores:
+                weights = weights.model_copy(update={"mobility": 0.0})
+                transport_available = False
+            else:
+                mobility_score = scores[h3_id]
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail="TravelTime API request failed") from exc
+        except (RuntimeError, httpx.HTTPError) as exc:
+            logger.warning("Mobility scoring unavailable (%s); excluding mobility", type(exc).__name__)
+            weights = weights.model_copy(update={"mobility": 0.0})
+            transport_available = False
 
-    routes = []
-    if settings.EXTERNAL_TRANSPORT_ENABLED:
-        if not settings.TRAVELTIME_API_KEY or not settings.TRAVELTIME_APP_ID:
-            raise HTTPException(status_code=503, detail="TravelTime API is not configured")
+    routes = {"type": "FeatureCollection", "features": []}
+    if transport_available and settings.TRAVELTIME_API_KEY and settings.TRAVELTIME_APP_ID:
         result = await db.execute(
             select(
                 HexTable.geom.cast(Geometry).ST_Y().label("lat"),
@@ -146,25 +143,25 @@ async def get_hexagon(
             raise HTTPException(status_code=404, detail="Hexagon not found")
         try:
             destinations = [(lat, lon) for lat, lon, _ in anchors] if anchors else [LVIV_CENTER]
-            collections = []
-            for destination in destinations:
-                route_result = await get_traveltime_routes(
-                    h3_id, (float(row["lat"]), float(row["lon"])), transportation, destination,
-                )
-                collections.append(route_result["routes"])
+
+            async def fetch_route_collections():
+                collections = []
+                for destination in destinations:
+                    route_result = await get_traveltime_routes(
+                        h3_id, (float(row["lat"]), float(row["lon"])), transportation, destination,
+                    )
+                    collections.append(route_result["routes"])
+                return collections
+
+            collections = await asyncio.wait_for(
+                fetch_route_collections(), timeout=ROUTE_LOOKUP_TIMEOUT_SECONDS
+            )
             await use_route_specific_bus_geometry(collections, db)
             routes = style_anchor_routes(collections) if anchors else collections[0]
-        except TravelTimeRouteFormatError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except (TravelTimeRouteFormatError, httpx.HTTPError, TimeoutError) as exc:
+            logger.warning("TravelTime routes unavailable (%s)", type(exc).__name__)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(status_code=502, detail=_traveltime_error_detail(exc)) from exc
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"TravelTime API request failed ({type(exc).__name__})",
-            ) from exc
 
     hexagon = {**hexagon, "mobility": mobility_score}
     user_weights = weights.model_dump()

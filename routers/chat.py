@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import secrets
+import re
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 
@@ -11,7 +13,27 @@ from app.chat_protocol import ChatProtocolError, parse_message, parse_question, 
 from app.chat_service import ChatReplyError, REPLY_TIMEOUT_SECONDS, generate_next_prompt, generate_reply
 from app.chat_sessions import ChatSessionError, ChatSessionStore, ChatTurn
 from app.config import settings
+from app.chat_dialogue import NEED_CELL
+from app.schemas import HexagonWeights
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from typing import Annotated
 
+
+class MapMobility(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    transportation: str = "bus"
+    anchor_lat: list[Annotated[float, Field(ge=-90, le=90)]] | None = None
+    anchor_lon: list[Annotated[float, Field(ge=-180, le=180)]] | None = None
+    weight: list[Annotated[float, Field(ge=0)]] | None = None
+
+    @model_validator(mode="after")
+    def matching_destinations(self):
+        if self.anchor_lat is None and self.anchor_lon is None and self.weight is None:
+            return self
+        if (not self.anchor_lat or not self.anchor_lon or len(self.anchor_lat) != len(self.anchor_lon)
+                or self.weight is not None and len(self.weight) != len(self.anchor_lat)):
+            raise ValueError("Provide matching destination coordinates and weights.")
+        return self
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -23,7 +45,10 @@ async def send_error(send: SendEvent, code: str, message: str, request_id: str |
 
 
 async def run_reply(
-    store: ChatSessionStore, token: str, request_id: str, question: str, send: SendEvent
+    store: ChatSessionStore, token: str, request_id: str, question: str, send: SendEvent,
+    stream: bool = False,
+    weights: dict[str, float] | None = None,
+    mobility: dict | None = None,
 ) -> None:
     attempt = secrets.token_hex(16)
     # A cancelled Redis write may already have applied. Release only our own attempt.
@@ -39,8 +64,19 @@ async def run_reply(
         if answer is None:
             await send({"type": "answer.status", "requestId": request_id, "stage": "generating"})
             deadline = asyncio.get_running_loop().time() + REPLY_TIMEOUT_SECONDS
+            state = {}
+
+            async def send_part(part: str) -> None:
+                for chunk in re.findall(r".+?(?:[.!?](?=\s)|\Z)", part, re.DOTALL):
+                    await send({"type": "answer.delta", "requestId": request_id, "text": chunk})
+
             try:
-                answer = await asyncio.wait_for(generate_reply(question, history), REPLY_TIMEOUT_SECONDS)
+                answer = await asyncio.wait_for(
+                    generate_reply(question, history, state=state, on_part=send_part if stream else None,
+                                   **({"user_weights": weights} if weights is not None else {}),
+                                   **({"mobility": mobility} if mobility is not None else {})),
+                    REPLY_TIMEOUT_SECONDS,
+                )
             except asyncio.TimeoutError:
                 raise ChatSessionError("reply_timeout", "The reply took too long.") from None
             except ChatReplyError as exc:
@@ -49,11 +85,18 @@ async def run_reply(
                 logger.error("Chat reply generation failed (%s)", type(exc).__name__)
                 raise ChatSessionError("reply_failed", "The reply could not be prepared.") from None
 
-            next_prompt = await generate_next_prompt(
-                question, answer, history,
-                timeout_seconds=max(0.0, deadline - asyncio.get_running_loop().time()),
-            )
+            if not state.get("social") and answer != NEED_CELL:
+                prompt_options = {}
+                prompt_history = history
+                if state.get("activeQuestion"):
+                    prompt_options["state"] = state
+                    prompt_history = [*history, {"question": question, "answer": answer, **state}]
+                next_prompt = await generate_next_prompt(
+                    state.get("activeQuestion", question), answer, prompt_history, **prompt_options,
+                    timeout_seconds=max(0.0, deadline - asyncio.get_running_loop().time()),
+                )
             turn: ChatTurn = {"requestId": request_id, "question": question, "answer": answer}
+            turn.update(state)
             if next_prompt is not None:
                 turn["nextPrompt"] = next_prompt
             await store.complete(token, attempt, turn)
@@ -131,22 +174,52 @@ async def chat_websocket(websocket: WebSocket) -> None:
 
                     token = None
                     supplied_token = parse_session_token(payload.get("sessionToken"))
+                    unfinished = {}
                     if supplied_token is None:
                         token = await store.create()
                         history = []
                     else:
-                        history = await store.history(supplied_token)
+                        snapshot = await store.snapshot(supplied_token)
+                        history = snapshot["history"]
+                        pending = snapshot.get("pending")
+                        if pending and "requestId" in pending:
+                            unfinished["pending"] = {
+                                "requestId": pending["requestId"], "question": pending["question"],
+                                "status": "generating" if pending["deadline"] > time.time() else "interrupted",
+                            }
                         token = supplied_token
-                    await send({"type": "session.ready", "sessionToken": token, "history": history})
+                    await send({"type": "session.ready", "sessionToken": token, "history": history, **unfinished})
                     continue
 
                 request_id, question = parse_question(payload)
+                mobility = None
+                if "mobility" in payload:
+                    try:
+                        mobility = MapMobility.model_validate(payload["mobility"]).model_dump(exclude_none=True)
+                    except ValidationError:
+                        raise ChatSessionError("invalid_mobility", "Перевірте налаштування транспорту й адрес.") from None
+                weights = None
+                if "weights" in payload:
+                    raw = payload["weights"]
+                    if not isinstance(raw, dict) or any(
+                        key.removeprefix("weight_") not in HexagonWeights.model_fields for key in raw
+                    ):
+                        raise ChatSessionError("invalid_weights", "Передайте ваги категорій OKIL.")
+                    try:
+                        weights = HexagonWeights.model_validate({
+                            "weight_" + key.removeprefix("weight_"): value for key, value in raw.items()
+                        }).model_dump()
+                    except ValidationError:
+                        raise ChatSessionError("invalid_weights", "Ваги мають бути числами від 0 до 5.") from None
                 if token is None:
                     raise ChatSessionError("session_required", "Send session.open before a question.")
                 if reply_task and not reply_task.done():
                     raise ChatSessionError("busy", "A reply is already being prepared.")
 
-                reply_task = asyncio.create_task(run_reply(store, token, request_id, question, send))
+                reply_task = asyncio.create_task(run_reply(
+                    store, token, request_id, question, send, stream=payload.get("stream") is True,
+                    weights=weights, mobility=mobility,
+                ))
             except ChatProtocolError as exc:
                 await send_error(send, exc.code, str(exc), exc.request_id)
             except ChatSessionError as exc:

@@ -120,7 +120,7 @@ def test_local_mode_excludes_mobility_and_skips_both_providers(monkeypatch, path
         assert body == [{"h3_id": "hex-a", "overall_rating": 100}]
     else:
         assert body["overall_rating"] == 100
-        assert body["routes"] == []
+        assert body["routes"] == {"type": "FeatureCollection", "features": []}
         rating = next(item for item in body["categories"] if item["category"] == "mobility")
         assert rating["enabled"] is False
         assert rating["weight"] == 0

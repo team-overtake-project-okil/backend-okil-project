@@ -62,6 +62,26 @@ def accepted(ws, request_id="req_1"):
     assert ws.receive_json() == {"type": "answer.status", "requestId": request_id, "stage": "generating"}
 
 
+def test_streamed_sentences_reconcile_with_saved_answer(client):
+    http, reply, _ = client
+    answer = "Перше речення. Друге речення!"
+
+    async def generate(question, history, *, state, on_part):
+        await on_part(answer)
+        return answer
+
+    reply.side_effect = generate
+    with connect(http) as ws:
+        ready = open_session(ws)
+        ws.send_json({"type": "message.send", "text": "Покажи рейтинг", "requestId": "r", "stream": True})
+        accepted(ws, "r")
+        chunks = [ws.receive_json(), ws.receive_json()]
+        assert all(event["type"] == "answer.delta" and event["requestId"] == "r" for event in chunks)
+        assert "".join(event["text"] for event in chunks) == answer
+        assert ws.receive_json()["text"] == answer
+        assert open_session(ws, ready["sessionToken"])["history"][0]["answer"] == answer
+
+
 def test_frontend_payload_gets_answer_and_session_restores_without_duplicate_ai_call(client):
     http, reply, _ = client
     with connect(http) as ws:
@@ -76,7 +96,7 @@ def test_frontend_payload_gets_answer_and_session_restores_without_duplicate_ai_
         send(ws)
         assert ws.receive_json()["type"] == "message.accepted"
         assert ws.receive_json()["type"] == "answer.completed"
-        reply.assert_awaited_once_with("Що таке OKIL?", [])
+        reply.assert_awaited_once_with("Що таке OKIL?", [], state={}, on_part=None)
         send(ws, "req_2", "Як працює карта?")
         accepted(ws, "req_2")
         assert ws.receive_json()["type"] == "answer.completed"
@@ -102,7 +122,7 @@ def test_ai_errors_keep_socket_open_do_not_save_failed_turn_and_allow_retry(clie
 def test_timeout_releases_session_and_can_retry(client, monkeypatch):
     http, reply, _ = client
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         await asyncio.Event().wait()
 
     reply.side_effect = pending
@@ -123,7 +143,7 @@ def test_disconnect_cancels_reply_and_releases_redis_claim(client):
     http, reply, _ = client
     cancelled = threading.Event()
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         try:
             await asyncio.Event().wait()
         finally:
@@ -158,7 +178,7 @@ def test_request_id_conflict_is_preserved(client):
 def test_concurrent_sockets_cannot_generate_two_replies_in_same_session(client):
     http, reply, _ = client
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         await asyncio.Event().wait()
 
     reply.side_effect = pending
@@ -273,7 +293,7 @@ def test_disconnect_during_next_prompt_cancels_provider_and_releases_session(cli
     started = threading.Event()
     cancelled = threading.Event()
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         started.set()
         try:
             await asyncio.Event().wait()
@@ -348,7 +368,7 @@ def test_clear_cancels_own_reply(client):
     http, reply, _ = client
     cancelled = threading.Event()
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         try:
             await asyncio.Event().wait()
         finally:
@@ -368,7 +388,7 @@ def test_reply_on_another_socket_cannot_recreate_deleted_history(client):
     http, reply, store = client
     release = asyncio.Event()
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         await release.wait()
         return "Late answer"
 
@@ -449,7 +469,7 @@ def test_clear_during_next_prompt_cancels_provider_and_discards_turn(client, mon
     started = threading.Event()
     cancelled = threading.Event()
 
-    async def pending(*args):
+    async def pending(*args, **kwargs):
         started.set()
         try:
             await asyncio.Event().wait()

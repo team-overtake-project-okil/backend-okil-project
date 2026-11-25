@@ -223,7 +223,7 @@ async def get_traveltime_routes(
     }
     routes: list[dict[str, Any]] = []
     scheduled_departures = _route_departure_times()
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         for mode in mobility_modes(transportation):
             transport_type = "public_transport" if mode == "bus" else "driving"
             choices_for_schedule = []
@@ -252,7 +252,10 @@ async def get_traveltime_routes(
                         TRAVELTIME_ROUTES_URL, headers=headers, json=payload
                     )
                     response.raise_for_status()
-                    candidates = _routes_from_response(response.json())
+                    try:
+                        candidates = _routes_from_response(response.json())
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        raise TravelTimeRouteFormatError("TravelTime returned invalid route data") from exc
                     if candidates and first_route is None:
                         first_route = candidates[0]
                     valid_candidates = [
