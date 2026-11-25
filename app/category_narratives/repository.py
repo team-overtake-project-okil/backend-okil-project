@@ -16,22 +16,32 @@ ORIGIN = """SELECT ST_Y(geom::geometry) lat, ST_X(geom::geometry) lon
 
 async def fetch_type_accessibility(db, h3_id):
     # Count within r1, not within an unrelated larger search radius.
+    # For parks, deduplicate multiple grid points of the same park by name.
     statement = text(f"""
         WITH origin AS ({ORIGIN}), configs AS (
             SELECT type, category, radius_of_influence_1 AS r1
             FROM point_types
         ), objects AS (
-            SELECT type, geom FROM points WHERE type <> 'gtfs_stop'
+            SELECT type, geom,
+                   CASE
+                       WHEN type = 'park' THEN COALESCE(NULLIF(trim(name), ''), id::text)
+                       ELSE id::text
+                   END AS entity_key
+            FROM points WHERE type <> 'gtfs_stop'
             UNION ALL
-            SELECT 'gtfs_stop' AS type, geom FROM stops
+            SELECT 'gtfs_stop' AS type, geom, id::text AS entity_key
+            FROM stops
         )
         SELECT pt.type, pt.category, pt.r1,
                stats.nearest_point_dist_m, stats.num_objects_in_radius
         FROM configs pt CROSS JOIN origin h
         LEFT JOIN LATERAL (
             SELECT min(d.distance_m) nearest_point_dist_m,
-                   count(*) FILTER (WHERE d.distance_m <= pt.r1) num_objects_in_radius
-            FROM (SELECT {DISTANCE} distance_m FROM objects o WHERE o.type = pt.type) d
+                   count(DISTINCT d.entity_key) FILTER (WHERE d.distance_m <= pt.r1) num_objects_in_radius
+            FROM (
+                SELECT {DISTANCE} distance_m, o.entity_key
+                FROM objects o WHERE o.type = pt.type
+            ) d
         ) stats ON TRUE
         ORDER BY pt.category, pt.type
     """)
