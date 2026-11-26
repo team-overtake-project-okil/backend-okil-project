@@ -128,3 +128,45 @@ def test_local_mode_excludes_mobility_and_skips_both_providers(monkeypatch, path
         assert explanations.await_args.args[2]["mobility"] == 0
     mobility.assert_not_awaited()
     routes.assert_not_awaited()
+
+
+def test_compare_scores_all_anchors_and_draws_selected_in_outline_colors(monkeypatch):
+    client, db = _client(monkeypatch)
+    ids = ["hex-a", "hex-b"]
+    colors = ["#b26782", "#827eae"]
+    result = Mock()
+    result.mappings.return_value = [
+        dict.fromkeys(SYSTEM_WEIGHTS, 90) | {"h3_id": i, "lat": 49.8, "lon": 24.0}
+        for i in reversed(ids)
+    ]
+    db.execute.return_value = result
+    for key in ("TRAVELTIME_API_KEY", "TRAVELTIME_APP_ID"):
+        monkeypatch.setattr(hexagons.settings, key, "test")
+    monkeypatch.setattr(hexagons.settings, "EXTERNAL_TRANSPORT_ENABLED", True)
+    monkeypatch.setattr(hexagons, "get_mobility_scores", AsyncMock(side_effect=[
+        dict.fromkeys(ids, 80), dict.fromkeys(ids, 45),
+    ]))
+    monkeypatch.setattr(hexagons, "fetch_hexagon_explanations", AsyncMock(
+        return_value={category: {"explanation": None} for category in SYSTEM_WEIGHTS},
+    ))
+    route_lookup = AsyncMock(return_value={"routes": {"features": [{
+        "type": "Feature", "properties": {"line_style": "solid", "transport_mode": "bus"},
+        "geometry": {"type": "LineString", "coordinates": [[24, 49.8], [24.01, 49.8]]},
+    }]}})
+    monkeypatch.setattr(hexagons, "get_traveltime_routes", route_lookup)
+    response = client.get("/hexagons/compare", params={
+        "h3_id": ids,
+        "color": colors,
+        "anchor_lat": [49.8, 49.9],
+        "anchor_lon": [24, 24.1],
+        "selected_anchor_index": 1,
+    })
+    assert response.status_code == 200, response.text
+    items = response.json()
+    assert [item["h3_id"] for item in items] == ids
+    assert all(item["mobility_scores"] == [80, 45] for item in items)
+    assert all({c["category"] for c in item["categories"]} == set(SYSTEM_WEIGHTS) for item in items)
+    assert [call.args[3] for call in route_lookup.await_args_list] == [(49.9, 24.1)] * 2
+    features = [f["properties"] for item in items for f in item["routes"]["features"]]
+    assert {p["anchor_index"] for p in features} == {1}
+    assert {p["color"] for p in features} == set(colors)

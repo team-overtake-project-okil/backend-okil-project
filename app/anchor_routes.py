@@ -74,16 +74,16 @@ def _stripe_pieces(edges, colors):
         points = [end]
 
 
-def style_anchor_routes(collections):
+def style_anchor_routes(collections, comparison_colors=None):
     output, rides = [], []
     grid = defaultdict(list)
     for anchor, collection in enumerate(collections):
-        base = PALETTE[anchor]
+        base = (comparison_colors or PALETTE)[anchor]
         previous = {}
         for feature in collection["features"]:
             props = dict(feature["properties"], anchor_index=anchor)
             feature = dict(feature, properties=props)
-            if props.get("line_style") == "dashed":
+            if not comparison_colors and props.get("line_style") == "dashed":
                 props["color"] = "#6B7280"
                 output.append(feature)
                 continue
@@ -92,8 +92,8 @@ def style_anchor_routes(collections):
             last, transfers = previous.get(route, (number, 0))
             transfers += int(number != last)
             previous[route] = number, transfers
-            props["color"] = _shade(base, transfers)
-            if props.get("transport_mode") != "bus":
+            props["color"] = base if comparison_colors else _shade(base, transfers)
+            if not comparison_colors and props.get("transport_mode") != "bus":
                 output.append(feature)
                 continue
             idx = len(rides)
