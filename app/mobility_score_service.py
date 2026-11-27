@@ -138,6 +138,10 @@ async def _fetch_mobility_scores(
             per_anchor[hex_id] = sum(slots) / len(slots)
         scores_by_anchor.append(per_anchor)
 
+    return combine_anchor_scores(hex_ids, anchors, scores_by_anchor)
+
+
+def combine_anchor_scores(hex_ids, anchors, scores_by_anchor):
     total_weight = sum(weight for _, _, weight in anchors)
     return {
         hex_id: min(

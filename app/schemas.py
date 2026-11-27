@@ -146,3 +146,23 @@ class StopRouteConnectableCreate(StopRouteConnectableBase):
 class StopRouteConnectableResponse(StopRouteConnectableBase):
     id: int
     model_config = ConfigDict(from_attributes=True)
+
+class ComparisonHexagon(BaseModel):
+    h3_id: str = Field(min_length=1)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+class ComparisonAnchor(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+
+
+class HexagonComparisonRequest(BaseModel):
+    hexagons: list[ComparisonHexagon] = Field(min_length=2, max_length=3)
+    weights: HexagonWeights | None = None
+    anchors: list[ComparisonAnchor] = Field(default_factory=list, max_length=5)
+    selected_anchor_index: int | None = Field(default=None, ge=0)
+
+
+class ComparisonAssessment(HexagonDetailResponse):
+    mobility_scores: list[int | None]
