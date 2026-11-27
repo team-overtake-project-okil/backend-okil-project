@@ -66,6 +66,8 @@ def test_other_origin_has_no_browser_access(app):
     "origin, method, expected",
     [
         ("http://localhost:5173", "GET", 200),
+        ("http://localhost:5173", "PUT", 200),
+        ("https://other.example", "PUT", 400),
         ("https://other.example", "GET", 400),
         ("http://localhost:5173", "POST", 400),
     ],
