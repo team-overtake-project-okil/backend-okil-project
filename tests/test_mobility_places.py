@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 
-from routers.mobility_places import TTL_SECONDS, cache_key, router
+from routers.mobility_places import cache_key, router
 
 
 @pytest.fixture
@@ -55,7 +55,8 @@ def test_places_round_trip_isolation_and_stale_write(client, redis_server):
     assert client.get(url, headers=headers).json() == snapshot
     key = cache_key(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token))
     with FakeRedis(server=redis_server) as redis:
-        assert 0 < redis.ttl(key) <= TTL_SECONDS
+        four_hours = 4 * 60 * 60
+        assert four_hours - 60 < redis.ttl(key) <= four_hours
 
     cleared = {**snapshot, "anchors": [], "selectedPresetId": None, "revision": 2}
     assert client.put(url, json=cleared, headers=headers).json() == cleared
