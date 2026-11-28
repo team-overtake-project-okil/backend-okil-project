@@ -10,7 +10,7 @@ from redis.exceptions import RedisError, WatchError
 
 router = APIRouter(prefix="/mobility/places")
 bearer = HTTPBearer(auto_error=False)
-TTL_SECONDS = 4 * 60 * 60
+TTL_SECONDS = 2 * 60 * 60
 
 
 class Place(BaseModel):

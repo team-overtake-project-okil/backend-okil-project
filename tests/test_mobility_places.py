@@ -55,8 +55,8 @@ def test_places_round_trip_isolation_and_stale_write(client, redis_server):
     assert client.get(url, headers=headers).json() == snapshot
     key = cache_key(HTTPAuthorizationCredentials(scheme="Bearer", credentials=token))
     with FakeRedis(server=redis_server) as redis:
-        four_hours = 4 * 60 * 60
-        assert four_hours - 60 < redis.ttl(key) <= four_hours
+        two_hours = 2 * 60 * 60
+        assert two_hours - 60 < redis.ttl(key) <= two_hours
 
     cleared = {**snapshot, "anchors": [], "selectedPresetId": None, "revision": 2}
     assert client.put(url, json=cleared, headers=headers).json() == cleared
